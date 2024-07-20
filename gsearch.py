@@ -218,23 +218,26 @@ def process_url(subquestion, url, model):
                 save_cleaned_content(subquestion, url, "", False, "Failed to extract cleaned text")
     return "", ""
 
-def search_google(query, num_results):
-    if query in google_cache:
-        logging.info(f"Using cached Google search results for query: {query}")
-        return google_cache[query]
-    try:
-        results = list(search(query, num_results=num_results))  # Convert generator to list
-        google_cache[query] = results
-        save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
-        return results
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:
-            retry_after = int(e.response.headers.get('Retry-After', CONFIG["INITIAL_RETRY_DELAY"]))
-            logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
-            time.sleep(retry_after)
-            return search_google(query, num_results)  # Retry the same query
-        logging.error(f"Failed to search for query '{query}': {e}")
-        return []
+def search_google_with_retries(query, num_results):
+    for attempt in range(CONFIG["MAX_RETRIES"]):
+        try:
+            if query in google_cache:
+                logging.info(f"Using cached Google search results for query: {query}")
+                return google_cache[query]
+            results = list(search(query, num_results=num_results))  # Convert generator to list
+            google_cache[query] = results
+            save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
+            return results
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                retry_after = CONFIG["INITIAL_RETRY_DELAY"] * (2 ** attempt)
+                logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
+                time.sleep(retry_after)
+            else:
+                logging.error(f"Failed to search for query '{query}': {e}")
+                return []
+    logging.error(f"Exhausted retries for query: {query}")
+    return []
 
 def process_subquestion(subquestion, model, num_search_results, original_query):
     visited_urls = set()
@@ -244,24 +247,9 @@ def process_subquestion(subquestion, model, num_search_results, original_query):
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    for attempt in range(CONFIG["MAX_RETRIES"]):
-        try:
-            results = search_google(subquestion, num_search_results)
-            if results:
-                urls_to_process.extend(results)
-                break
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                retry_after = CONFIG["INITIAL_RETRY_DELAY"] * (2 ** attempt)
-                logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
-                time.sleep(retry_after)
-            else:
-                logging.error(f"Failed to search for subquestion '{subquestion}': {e}")
-                return "", []
-
-    if not urls_to_process:
-        logging.error(f"Exhausted retries for subquestion: {subquestion}")
-        return "", []
+    results = search_google_with_retries(subquestion, num_search_results)
+    if results:
+        urls_to_process.extend(results)
 
     logging.info(f"Initial URLs to process: {len(urls_to_process)}")
 
