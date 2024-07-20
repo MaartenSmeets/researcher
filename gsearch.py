@@ -14,8 +14,8 @@ import ollama
 # Configurable parameters
 CONFIG = {
     "MODEL": "gemma2unc",
-    "NUM_SUBQUESTIONS": 10,
-    "NUM_SEARCH_RESULTS": 10,
+    "NUM_SUBQUESTIONS": 5,
+    "NUM_SEARCH_RESULTS": 5,
     "LOG_FILE": 'logs/app.log',
     "CACHE_FILE": 'cache/cache.db',
     "EXTRACTED_CONTENT_DIR": 'extracted_content',
@@ -180,6 +180,7 @@ def generate_summary(text, query_context, model):
     logging.info(f"Requesting summary for text from URL. Query context: {query_context[:100]}...")
     response = generate_response_with_ollama(prompt, model)
     if response:
+        logging.info(f"Summary generated successfully for context: {query_context[:100]}...")
         return response.strip()
     else:
         logging.error("Failed to generate summary.")
@@ -197,97 +198,74 @@ def evaluate_content_relevance(content, query_context, model):
     if response:
         is_relevant = response.lower().startswith("yes")
         reason = response[4:].strip()
+        logging.info(f"Content relevance evaluation result for context {query_context[:100]}: {is_relevant}, Reason: {reason}")
         return is_relevant, reason
     else:
         logging.error("Failed to evaluate content relevance.")
         return False, "Evaluation failed"
 
-def evaluate_link_relevance(links, query_context, html_content, model):
-    relevant_links = []
-    for link in links:
-        prompt = (
-            f"Given the following query context: {query_context}\n\n"
-            f"Evaluate the relevance of the provided URL within the context of the following HTML content. "
-            f"Respond strictly with 'yes' or 'no', followed by a brief and concise explanation.\n\n"
-            f"URL: {link}\n"
-            f"HTML Content:\n{html_content[:2000]}\n"
-            f"Response (yes or no):"
-        )
-        logging.info(f"Evaluating link relevance for link: {link}. Query context: {query_context[:100]}...")
-        response = generate_response_with_ollama(prompt, model)
-        if response:
-            if response.lower().startswith("yes"):
-                relevant_links.append(link)
-        else:
-            logging.error(f"Failed to evaluate link relevance for {link}")
-    return relevant_links
+def process_subquestion(subquestion, model, num_search_results, original_query):
+    visited_urls = set()
+    all_contexts = ""
+    all_references = []
+
+    logging.info(f"Processing subquestion: {subquestion}")
+    try:
+        results = search(subquestion, num_results=num_search_results)
+    except Exception as e:
+        logging.error(f"Failed to search for subquestion '{subquestion}': {e}")
+        return "", []
+
+    urls_to_process = set(results)
+
+    while urls_to_process:
+        logging.info(f"Number of URLs to process: {len(urls_to_process)}")
+        current_url = urls_to_process.pop()
+        if current_url in visited_urls:
+            continue
+
+        logging.info(f"Fetching page content for URL: {current_url}")
+        html_content, _ = get_page_content(subquestion, current_url, visited_urls)
+        if html_content:
+            logging.info(f"Cleaning HTML content for URL: {current_url}")
+            cleaned_html = clean_html_content(html_content)
+            if cleaned_html:
+                extracted_text = extract_text_from_html(cleaned_html)
+                if extracted_text:
+                    logging.info(f"Evaluating content relevance for URL: {current_url}")
+                    is_relevant, reason = evaluate_content_relevance(extracted_text, subquestion, model)
+                    if is_relevant:
+                        logging.info(f"Content from {current_url} is relevant. Generating summary.")
+                        summary = generate_summary(extracted_text, subquestion, model)
+                        save_cleaned_content(subquestion, current_url, extracted_text, summary, is_relevant, reason)
+                        all_contexts += f"Summary of document from {current_url}:\n{summary}\n\n"
+                        all_references.append(current_url)
+                        visited_urls.add(current_url)
+
+    return all_contexts, all_references
 
 def search_and_extract(subquestions, model, num_search_results, original_query):
-    sufficient_context = False
-    visited_urls = set()
-    depth_1_urls = set()
+    all_contexts = ""
+    all_references = []
 
-    while not sufficient_context:
-        all_contexts = ""
-        all_references = []
+    while subquestions:
+        logging.info(f"Number of subquestions to process: {len(subquestions)}")
+        subquestion = subquestions.pop()
+        context, references = process_subquestion(subquestion, model, num_search_results, original_query)
 
-        for subquestion in subquestions:
-            logging.info(f"Processing subquestion: {subquestion}")
-            try:
-                results = search(subquestion, num_results=num_search_results)
-            except Exception as e:
-                logging.error(f"Failed to search for subquestion '{subquestion}': {e}")
-                continue
-
-            context = ""
-            references = []
-
-            for url in results:
-                if url in visited_urls:
-                    continue
-
-                logging.info(f"Fetching page content for URL: {url}")
-                html_content, links = get_page_content(subquestion, url, visited_urls)
-                if html_content:
-                    logging.info(f"Cleaning HTML content for URL: {url}")
-                    cleaned_html = clean_html_content(html_content)
-                    if cleaned_html:
-                        extracted_text = extract_text_from_html(cleaned_html)
-                        if extracted_text:
-                            logging.info(f"Evaluating content relevance for URL: {url}")
-                            is_relevant, reason = evaluate_content_relevance(extracted_text, original_query, model)
-                            if is_relevant:
-                                logging.info(f"Content from {url} is relevant. Generating summary.")
-                                summary = generate_summary(extracted_text, original_query, model)
-                                save_cleaned_content(subquestion, url, extracted_text, summary, is_relevant, reason)
-                                context += f"Summary of document from {url}:\n{summary}\n\n"
-                                references.append(url)
-                                visited_urls.add(url)
-                                depth_1_urls.add(url)
-
-                                logging.info(f"Evaluating link relevance for URL: {url}")
-                                relevant_links = evaluate_link_relevance(links, original_query, html_content, model)
-                                for link in relevant_links:
-                                    if link not in visited_urls and link not in depth_1_urls:
-                                        visited_urls.add(link)
-                                        if url not in depth_1_urls:
-                                            results.append(link)
-                            else:
-                                logging.info(f"Content from {url} deemed irrelevant or untrustworthy. Reason: {reason}")
-
-            if context:
-                all_contexts += context
-                all_references.extend(references)
-
-        if all_contexts:
-            sufficient_context = True
-            prompt = f"Given the following context, answer the question: {original_query}\n\nContext:\n{all_contexts}\n\nReferences:\n" + "\n".join(all_references)
-            logging.info(f"Requesting final answer for the original query. Query: {original_query}")
-            response = generate_response_with_ollama(prompt, model)
-            logging.info(f"Final response:\n{response}\n")
+        if context:
+            all_contexts += context
+            all_references.extend(references)
         else:
-            logging.info("Insufficient context, rephrasing subquestions.")
-            subquestions = rephrase_query_to_subquestions(original_query, model, CONFIG["NUM_SUBQUESTIONS"])
+            logging.info(f"Insufficient context, refining subquestion: {subquestion}")
+            refined_subquestions = rephrase_query_to_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"])
+            subquestions.extend(refined_subquestions)
+
+    if all_contexts:
+        prompt = f"Given the following context, answer the question: {original_query}\n\nContext:\n{all_contexts}\n\nReferences:\n" + "\n".join(all_references)
+        logging.info(f"Requesting final answer for the original query. Query: {original_query}")
+        response = generate_response_with_ollama(prompt, model)
+        logging.info(f"Final response:\n{response}\n")
 
 def generate_response_with_ollama(prompt, model):
     if prompt in cache:
@@ -324,7 +302,7 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
         return []
 
 if __name__ == "__main__":
-    original_query = "Suggest feats for a dnd 5th edition eldritch knight elf focused on ranged combat with dex 20 and int 16 who already has crossbow expert and sharpshooter. Do not use homebrew content but only from verifiable official DnD books like Xanathar's Guide to Everything and the Player's Handbook, Tasha's Cauldron of Everything, Player's Handbook, Dungeon Master's Guide."
+    original_query = "Suggest appropriate feats for a Dungeons & Dragons 5th Edition Eldritch Knight Elf who specializes in ranged combat. The character has a Dexterity score of 20 and an Intelligence score of 16. The character already possesses the Crossbow Expert and Sharpshooter feats. Please recommend feats exclusively from officially published D&D sources, such as the Player's Handbook, Xanathar's Guide to Everything, Tasha's Cauldron of Everything, and the Dungeon Master's Guide. Do not include any homebrew or unofficial content in your suggestions."
     
     logging.info(f"Starting script with original query: {original_query}")
     subquestions = rephrase_query_to_subquestions(original_query, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"])
