@@ -29,7 +29,6 @@ CONFIG = {
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/85.0"
     ],
-    "RETRY_COUNT": 3,
     "REQUEST_DELAY": 5,  # Delay between requests in seconds
     "INITIAL_RETRY_DELAY": 60,  # Initial delay for exponential backoff in seconds
     "MAX_RETRIES": 3  # Maximum number of retries
@@ -213,9 +212,10 @@ def process_url(subquestion, url, model):
             if cleaned_text:
                 logging.info(f"Evaluating content relevance for URL: {url}")
                 is_relevant, reason = evaluate_content_relevance(cleaned_text, subquestion, model)
-                if is_relevant:
-                    save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
-                    return cleaned_text, url
+                save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
+                return cleaned_text, url
+            else:
+                save_cleaned_content(subquestion, url, "", False, "Failed to extract cleaned text")
     return "", ""
 
 def search_google(query, num_results):
@@ -223,7 +223,7 @@ def search_google(query, num_results):
         logging.info(f"Using cached Google search results for query: {query}")
         return google_cache[query]
     try:
-        results = search(query, num_results=num_results)
+        results = list(search(query, num_results=num_results))  # Convert generator to list
         google_cache[query] = results
         save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
         return results
@@ -241,11 +241,10 @@ def process_subquestion(subquestion, model, num_search_results, original_query):
     all_contexts = ""
     all_references = []
     urls_to_process = []
-    retry_count = CONFIG.get("RETRY_COUNT", 3)
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    for attempt in range(retry_count):
+    for attempt in range(CONFIG["MAX_RETRIES"]):
         try:
             results = search_google(subquestion, num_search_results)
             if results:
