@@ -4,10 +4,10 @@ import os
 import shelve
 import fcntl
 import hashlib
-import random
 import shutil
 import re
 import time
+import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 from lxml import etree, html
 from googlesearch import search
@@ -15,20 +15,14 @@ import ollama
 
 # Configurable parameters
 CONFIG = {
-    "MODEL": "gemma2unc",
+    "MODEL": "gemma2:27b-instruct-fp16",
     "NUM_SUBQUESTIONS": 10,
     "NUM_SEARCH_RESULTS": 20,
     "LOG_FILE": 'logs/app.log',
     "LLM_CACHE_FILE": 'cache/llm_cache.db',
     "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
     "EXTRACTED_CONTENT_DIR": 'extracted_content',
-    "USER_AGENTS": [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.150 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/85.0"
-    ],
+    "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "REQUEST_DELAY": 5,  # Delay between requests in seconds
     "INITIAL_RETRY_DELAY": 60,  # Initial delay for exponential backoff in seconds
     "MAX_RETRIES": 3  # Maximum number of retries
@@ -89,19 +83,21 @@ def save_cache(cache, cache_file):
     except Exception as e:
         logging.error(f"Failed to save cache: {e}")
 
-def save_raw_content(subquestion, url, raw_text):
+def save_raw_content(subquestion, url, raw_content, content_type):
     filename_hash = hashlib.md5((subquestion + url).encode('utf-8')).hexdigest()
-    raw_filename = f"{filename_hash}_raw.txt"
+    raw_filename = f"{filename_hash}_raw.{content_type}"
     metadata_filename = f"{filename_hash}_raw_meta.txt"
 
-    with open(os.path.join(RAW_CONTENT_DIR, raw_filename), 'w', encoding='utf-8') as f:
-        f.write(raw_text)
+    mode = 'wb' if content_type == 'pdf' else 'w'
+    with open(os.path.join(RAW_CONTENT_DIR, raw_filename), mode) as f:
+        f.write(raw_content)
 
     with open(os.path.join(RAW_CONTENT_DIR, metadata_filename), 'w', encoding='utf-8') as f:
         metadata = {
             'url': url,
             'subquestion': subquestion,
-            'status': 'raw'
+            'status': 'raw',
+            'content_type': content_type
         }
         f.write(str(metadata))
 
@@ -123,30 +119,27 @@ def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason):
         }
         f.write(str(metadata))
 
-def fetch_page_content(url):
+def fetch_content(url):
     try:
-        headers = {'User-Agent': random.choice(CONFIG["USER_AGENTS"])}
+        headers = {'User-Agent': CONFIG["USER_AGENT"]}
         response = requests.get(url, headers=headers)
         response.raise_for_status()
 
-        if 'text/html' in response.headers.get('Content-Type', ''):
+        content_type = response.headers.get('Content-Type', '')
+
+        if 'text/html' in content_type:
             try:
-                return response.content.decode('utf-8')
+                return response.content.decode('utf-8'), 'html'
             except UnicodeDecodeError:
-                return response.content.decode('ISO-8859-1')
+                return response.content.decode('ISO-8859-1'), 'html'
+        elif 'application/pdf' in content_type:
+            return response.content, 'pdf'
         else:
-            logging.info(f"Skipped non-HTML content at {url}")
-            return ""
+            logging.info(f"Skipped non-HTML and non-PDF content at {url}")
+            return "", ""
     except requests.RequestException as e:
         logging.error(f"Failed to retrieve {url}: {e}")
-        return ""
-
-def get_page_content(subquestion, url):
-    raw_content = fetch_page_content(url)
-    if raw_content:
-        save_raw_content(subquestion, url, raw_content)
-        return raw_content
-    return ""
+        return "", ""
 
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -173,6 +166,18 @@ def extract_text_from_html(cleaned_html):
     soup = BeautifulSoup(cleaned_html, 'html.parser')
     return soup.get_text(separator='\n')
 
+def extract_text_from_pdf(pdf_content):
+    try:
+        pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
+        text = ""
+        for page_num in range(pdf_document.page_count):
+            page = pdf_document.load_page(page_num)
+            text += page.get_text("text")
+        return text
+    except Exception as e:
+        logging.error(f"Error in extracting text from PDF: {e}")
+        return ""
+
 def cleanup_extracted_text(text):
     # Remove multiple empty lines
     text = re.sub(r'\n\s*\n', '\n\n', text)
@@ -186,7 +191,7 @@ def evaluate_content_relevance(content, query_context, model):
     prompt = (
         f"Given the following query context: {query_context}\n"
         f"Evaluate the relevance and trustworthiness of the provided content. Respond strictly with 'yes' or 'no', followed by a brief and concise explanation.\n\n"
-        f"Content:\n{content[:1000]}\n"
+        f"Content:\n{content[:4000]}\n"
         f"Response (yes or no):"
     )
     logging.info(f"Evaluating content relevance for query context: {query_context[:100]}...")
@@ -201,21 +206,28 @@ def evaluate_content_relevance(content, query_context, model):
         return False, "Evaluation failed"
 
 def process_url(subquestion, url, model):
-    logging.info(f"Fetching page content for URL: {url}")
-    html_content = get_page_content(subquestion, url)
-    if html_content:
-        logging.info(f"Cleaning HTML content for URL: {url}")
-        cleaned_html = clean_html_content(html_content)
-        if cleaned_html:
+    logging.info(f"Fetching content for URL: {url}")
+    content, content_type = fetch_content(url)
+    if content:
+        save_raw_content(subquestion, url, content, content_type)
+        if content_type == 'pdf':
+            logging.info(f"Extracting text from PDF content for URL: {url}")
+            extracted_text = extract_text_from_pdf(content)
+        elif content_type == 'html':
+            logging.info(f"Cleaning HTML content for URL: {url}")
+            cleaned_html = clean_html_content(content)
             extracted_text = extract_text_from_html(cleaned_html)
-            cleaned_text = cleanup_extracted_text(extracted_text)
-            if cleaned_text:
-                logging.info(f"Evaluating content relevance for URL: {url}")
-                is_relevant, reason = evaluate_content_relevance(cleaned_text, subquestion, model)
-                save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
-                return cleaned_text, url
-            else:
-                save_cleaned_content(subquestion, url, "", False, "Failed to extract cleaned text")
+        else:
+            return "", ""
+
+        cleaned_text = cleanup_extracted_text(extracted_text)
+        if cleaned_text:
+            logging.info(f"Evaluating content relevance for URL: {url}")
+            is_relevant, reason = evaluate_content_relevance(cleaned_text, subquestion, model)
+            save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
+            return cleaned_text, url
+        else:
+            save_cleaned_content(subquestion, url, "", False, "Failed to extract cleaned text")
     return "", ""
 
 def search_google_with_retries(query, num_results):
