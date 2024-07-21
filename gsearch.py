@@ -112,7 +112,7 @@ def save_raw_content(subquestion, url, raw_content, content_type):
         }
         f.write(str(metadata))
 
-def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, source="web"):
+def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, source="web", vector_metadata=None):
     filename_hash = hashlib.md5((subquestion + url).encode('utf-8')).hexdigest()
     cleaned_filename = f"{filename_hash}_cleaned.txt"
     metadata_filename = f"{filename_hash}_cleaned_meta.txt"
@@ -127,7 +127,8 @@ def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, so
             'subquestion': subquestion,
             'status': 'relevant' if is_relevant else 'not_relevant',
             'reason': reason,
-            'source': source
+            'source': source,
+            'vector_metadata': vector_metadata
         }
         f.write(str(metadata))
 
@@ -324,15 +325,16 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
-            logging.info(f"Evaluating content relevance for document from vector store.")
-            is_relevant, reason = evaluate_content_relevance(doc, subquestion, model)
+            combined_context = f"Document: {doc}\nMetadata: {meta}"
+            logging.info(f"Evaluating content relevance for document from vector store with metadata.")
+            is_relevant, reason = evaluate_content_relevance(combined_context, subquestion, model)
             source = meta.get('source', 'vector_store')
             if is_relevant:
-                all_contexts += f"Content from {source}:\n{doc}\n\n"
+                all_contexts += f"Content from {source}:\n{doc}\nMetadata: {meta}\n\n"
                 all_references.append(source)
                 # Save the document as cleaned content
                 filename_hash = hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()
-                save_cleaned_content(subquestion, source, doc, is_relevant, reason, source="vector_store")
+                save_cleaned_content(subquestion, source, combined_context, is_relevant, reason, source="vector_store", vector_metadata=meta)
                 # Log at least 200 characters of the document text
                 logging.info(f"Document from vector store: {doc[:200]}")
 
@@ -361,7 +363,13 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             subquestions.extend(refined_subquestions)
 
     if all_contexts:
-        prompt = f"Given the following context, answer the question: {original_query}\n\nContext:\n{all_contexts}"
+        prompt = (
+            f"Given the following context, answer the question: {original_query}\n\n"
+            f"Context provided contains both factual data and opinions:\n\n"
+            f"1. Factual data from vector store documents (reliable sources).\n"
+            f"2. Opinions and thoughts from internet sources (less reliable but still sometimes factual).\n\n"
+            f"Context:\n{all_contexts}"
+        )
         logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}")
         response = generate_response_with_ollama(prompt, model)
         logging.info(f"Output:\n{response}")
