@@ -2,7 +2,6 @@ import logging
 import requests
 import os
 import shelve
-import fcntl
 import hashlib
 import shutil
 import re
@@ -12,12 +11,22 @@ from bs4 import BeautifulSoup
 from lxml import etree, html
 from googlesearch import search
 import ollama
+import chromadb
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+import torch
+import portalocker  # Cross-platform file locking
+import pytesseract
+from PIL import Image
+import io
+
+device = torch.device("cpu")
 
 # Configurable parameters
 CONFIG = {
     "MODEL": "gemma2:27b-instruct-fp16",
     "NUM_SUBQUESTIONS": 10,
-    "NUM_SEARCH_RESULTS": 20,
+    "NUM_SEARCH_RESULTS_GOOGLE": 20,
+    "NUM_SEARCH_RESULTS_VECTOR": 10,
     "LOG_FILE": 'logs/app.log',
     "LLM_CACHE_FILE": 'cache/llm_cache.db',
     "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
@@ -25,7 +34,11 @@ CONFIG = {
     "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
     "REQUEST_DELAY": 5,  # Delay between requests in seconds
     "INITIAL_RETRY_DELAY": 60,  # Initial delay for exponential backoff in seconds
-    "MAX_RETRIES": 3  # Maximum number of retries
+    "MAX_RETRIES": 3,  # Maximum number of retries
+    "VECTOR_STORE_PATH": "./vector_store",
+    "VECTOR_STORE_COLLECTION": "documents",
+    "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
+    "TEXT_SNIPPET_LENGTH": 200
 }
 
 RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
@@ -76,10 +89,8 @@ google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE"])
 
 def save_cache(cache, cache_file):
     try:
-        with open(cache_file + '.lock', 'w') as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        with portalocker.Lock(cache_file + '.lock', 'w'):
             cache.sync()
-            fcntl.flock(lock_file, fcntl.LOCK_UN)
     except Exception as e:
         logging.error(f"Failed to save cache: {e}")
 
@@ -101,7 +112,7 @@ def save_raw_content(subquestion, url, raw_content, content_type):
         }
         f.write(str(metadata))
 
-def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason):
+def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, source="web"):
     filename_hash = hashlib.md5((subquestion + url).encode('utf-8')).hexdigest()
     cleaned_filename = f"{filename_hash}_cleaned.txt"
     metadata_filename = f"{filename_hash}_cleaned_meta.txt"
@@ -115,7 +126,8 @@ def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason):
             'url': url,
             'subquestion': subquestion,
             'status': 'relevant' if is_relevant else 'not_relevant',
-            'reason': reason
+            'reason': reason,
+            'source': source
         }
         f.write(str(metadata))
 
@@ -172,7 +184,17 @@ def extract_text_from_pdf(pdf_content):
         text = ""
         for page_num in range(pdf_document.page_count):
             page = pdf_document.load_page(page_num)
-            text += page.get_text("text")
+            page_text = page.get_text("text")
+            
+            # If the regular text extraction doesn't work well (e.g., it's mostly empty), use OCR
+            if len(page_text.strip()) < 50:
+                logging.info(f"Using OCR for page {page_num} due to insufficient text extraction.")
+                pix = page.get_pixmap()
+                img = Image.open(io.BytesIO(pix.pil_tobytes(format="png")))
+                page_text = pytesseract.image_to_string(img, config='--psm 1')
+            
+            text += page_text
+        
         return text
     except Exception as e:
         logging.error(f"Error in extracting text from PDF: {e}")
@@ -185,6 +207,8 @@ def cleanup_extracted_text(text):
     text = '\n'.join([line.strip() for line in text.split('\n')])
     # Remove multiple spaces and tabs
     text = re.sub(r'\s+', ' ', text)
+    # Remove unwanted characters or artifacts from OCR
+    text = re.sub(r'\x0c', '', text)  # Remove form feed characters
     return text
 
 def evaluate_content_relevance(content, query_context, model):
@@ -194,12 +218,12 @@ def evaluate_content_relevance(content, query_context, model):
         f"Content:\n{content[:4000]}\n"
         f"Response (yes or no):"
     )
-    logging.info(f"Evaluating content relevance for query context: {query_context[:100]}...")
+    logging.info(f"Evaluating content relevance for query context: {query_context[:200]}...")
     response = generate_response_with_ollama(prompt, model)
     if response:
         is_relevant = response.lower().startswith("yes")
         reason = response[4:].strip()
-        logging.info(f"Content relevance evaluation result for context {query_context[:100]}: {is_relevant}, Reason: {reason}")
+        logging.info(f"Content relevance evaluation result for context {query_context[:200]}: {is_relevant}, Reason: {reason}")
         return is_relevant, reason
     else:
         logging.error("Failed to evaluate content relevance.")
@@ -225,6 +249,8 @@ def process_url(subquestion, url, model):
             logging.info(f"Evaluating content relevance for URL: {url}")
             is_relevant, reason = evaluate_content_relevance(cleaned_text, subquestion, model)
             save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
+            # Log at least 200 characters of the cleaned text
+            logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
             return cleaned_text, url
         else:
             save_cleaned_content(subquestion, url, "", False, "Failed to extract cleaned text")
@@ -251,31 +277,64 @@ def search_google_with_retries(query, num_results):
     logging.error(f"Exhausted retries for query: {query}")
     return []
 
-def process_subquestion(subquestion, model, num_search_results, original_query):
+def query_vector_store(collection, query, top_k=5):
+    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
+    embedding = embed_model.get_text_embedding(query)
+    try:
+        results = collection.query(query_embeddings=[embedding], n_results=top_k, include=["documents", "metadatas"])
+        logging.info(f"Found {len(results['documents'])} documents in vector store for query: {query}")
+        return results
+    except Exception as e:
+        logging.error(f"Failed to query vector store: {e}")
+        return []
+
+def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
     visited_urls = set()
     all_contexts = ""
     all_references = []
     urls_to_process = []
+    documents_to_process = []
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    results = search_google_with_retries(subquestion, num_search_results)
+    results = search_google_with_retries(subquestion, num_search_results_google)
     if results:
         urls_to_process.extend(results)
 
-    logging.info(f"Initial URLs to process: {len(urls_to_process)}")
+    vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_PATH"])
+    collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION"])
+    vector_results = query_vector_store(collection, subquestion, top_k=num_search_results_vector)
+    
+    for docs, metas in zip(vector_results['documents'], vector_results['metadatas']):
+        for doc, meta in zip(docs, metas):
+            documents_to_process.append((doc, meta))
 
-    while urls_to_process:
-        logging.info(f"URLs left to process: {len(urls_to_process)}")
-        current_url = urls_to_process.pop(0)
-        if current_url in visited_urls:
-            continue
+    logging.info(f"Initial items to process: URLs = {len(urls_to_process)}, Documents = {len(documents_to_process)}")
 
-        extracted_text, reference = process_url(subquestion, current_url, model)
-        if extracted_text:
-            all_contexts += f"Content from {current_url}:\n{extracted_text}\n\n"
-            all_references.append(reference)
-            visited_urls.add(current_url)
+    while urls_to_process or documents_to_process:
+        if urls_to_process:
+            current_url = urls_to_process.pop(0)
+            if current_url in visited_urls:
+                continue
+            extracted_text, reference = process_url(subquestion, current_url, model)
+            if extracted_text:
+                all_contexts += f"Content from {current_url}:\n{extracted_text}\n\n"
+                all_references.append(reference)
+                visited_urls.add(current_url)
+
+        if documents_to_process:
+            doc, meta = documents_to_process.pop(0)
+            logging.info(f"Evaluating content relevance for document from vector store.")
+            is_relevant, reason = evaluate_content_relevance(doc, subquestion, model)
+            source = meta.get('source', 'vector_store')
+            if is_relevant:
+                all_contexts += f"Content from {source}:\n{doc}\n\n"
+                all_references.append(source)
+                # Save the document as cleaned content
+                filename_hash = hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()
+                save_cleaned_content(subquestion, source, doc, is_relevant, reason, source="vector_store")
+                # Log at least 200 characters of the document text
+                logging.info(f"Document from vector store: {doc[:200]}")
 
         # Delay between queries
         time.sleep(CONFIG["REQUEST_DELAY"])
@@ -283,14 +342,14 @@ def process_subquestion(subquestion, model, num_search_results, original_query):
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
     return all_contexts, all_references
 
-def search_and_extract(subquestions, model, num_search_results, original_query):
+def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query):
     all_contexts = ""
     all_references = []
 
     while subquestions:
         logging.info(f"Number of subquestions to process: {len(subquestions)}")
         subquestion = subquestions.pop()
-        context, references = process_subquestion(subquestion, model, num_search_results, original_query)
+        context, references = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
 
         if context:
             all_contexts += context
@@ -302,11 +361,10 @@ def search_and_extract(subquestions, model, num_search_results, original_query):
             subquestions.extend(refined_subquestions)
 
     if all_contexts:
-        prompt = f"Given the following context, answer the question: {original_query}\n\nContext:\n{all_contexts}\n\nReferences:\n" + "\n".join(all_references)
-        logging.info(f"Requesting final answer for the original query. Query: {original_query}")
+        prompt = f"Given the following context, answer the question: {original_query}\n\nContext:\n{all_contexts}"
+        logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}")
         response = generate_response_with_ollama(prompt, model)
-        logging.info(f"Final answer: {response}")
-        logging.info(f"Input:\n{original_query}\n\nContext:\n{all_contexts}\n\nReferences:\n" + "\n".join(all_references) + f"\n\nOutput:\n{response}")
+        logging.info(f"Output:\n{response}")
 
 def generate_response_with_ollama(prompt, model):
     if prompt in llm_cache:
@@ -350,7 +408,7 @@ if __name__ == "__main__":
     logging.info(f"Starting script with original query: {original_query}")
     subquestions = rephrase_query_to_subquestions(original_query, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"])
     if subquestions:
-        search_and_extract(subquestions, CONFIG["MODEL"], CONFIG["NUM_SEARCH_RESULTS"], original_query)
+        search_and_extract(subquestions, CONFIG["MODEL"], CONFIG["NUM_SEARCH_RESULTS_GOOGLE"], CONFIG["NUM_SEARCH_RESULTS_VECTOR"], original_query)
     logging.info("Script completed.")
     if llm_cache:
         llm_cache.close()
