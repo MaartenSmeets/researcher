@@ -23,11 +23,11 @@ from transformers import AutoTokenizer
 from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
-hf_token = "?"
+hf_token = "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"
 if hf_token:
     login(token=hf_token)
 else:
-    logging.error("HuggingFace API token is not set. Please set the HUGGINGFACEHUB_API_TOKEN environment variable.")
+    logging.error("HuggingFace API token is not set.")
     exit(1)
 
 device = torch.device("cpu")
@@ -37,8 +37,8 @@ CONFIG = {
     "MODEL": "gemma2:27b-instruct-fp16",
     "TOKENIZER": "google/gemma-2-27b",
     "NUM_SUBQUESTIONS": 10,
-    "NUM_SEARCH_RESULTS_GOOGLE": 20,
-    "NUM_SEARCH_RESULTS_VECTOR": 10,
+    "NUM_SEARCH_RESULTS_GOOGLE": 10,
+    "NUM_SEARCH_RESULTS_VECTOR": 5,
     "LOG_FILE": 'logs/app.log',
     "LLM_CACHE_FILE": 'cache/llm_cache.db',
     "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
