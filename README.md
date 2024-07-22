@@ -81,13 +81,9 @@ The provided script performs web scraping, data cleaning, and relevance evaluati
 
 ### Environment Setup
 
+Ensure that ollama is installed and you have gemma2:27b-instruct-fp16 available:
+
 Ensure you have Python installed. It is recommended to create a virtual environment:
-
-```sh
-python -m venv myenv
-source myenv/bin/activate  # On Windows: myenv\Scripts\activate
-
-#### Install dependencies
 
 Use pip to install the required libraries:
 ```sh
