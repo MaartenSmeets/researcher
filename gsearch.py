@@ -1,12 +1,10 @@
 import logging
-import requests
 import os
 import shelve
 import hashlib
 import shutil
 import re
 import time
-import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 from lxml import etree, html
 from googlesearch import search
@@ -14,10 +12,13 @@ import ollama
 import chromadb
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import torch
-import portalocker  # Cross-platform file locking
-import pytesseract
-from PIL import Image
-import io
+import portalocker
+from urllib.parse import urlparse
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
 
 device = torch.device("cpu")
 
@@ -31,10 +32,10 @@ CONFIG = {
     "LLM_CACHE_FILE": 'cache/llm_cache.db',
     "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
     "EXTRACTED_CONTENT_DIR": 'extracted_content',
-    "USER_AGENT": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "REQUEST_DELAY": 5,  # Delay between requests in seconds
-    "INITIAL_RETRY_DELAY": 60,  # Initial delay for exponential backoff in seconds
-    "MAX_RETRIES": 3,  # Maximum number of retries
+    "REQUEST_DELAY": 5,
+    "INITIAL_RETRY_DELAY": 60,
+    "MAX_RETRIES": 3,
+    "MAX_REDIRECTS": 3,
     "VECTOR_STORE_PATH": "./vector_store",
     "VECTOR_STORE_COLLECTION": "documents",
     "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
@@ -46,11 +47,9 @@ CLEANED_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'cleaned')
 RELEVANT_DIR = os.path.join(CLEANED_CONTENT_DIR, 'relevant')
 NOT_RELEVANT_DIR = os.path.join(CLEANED_CONTENT_DIR, 'not_relevant')
 
-# Create directories if they don't exist
 for directory in [os.path.dirname(CONFIG["LOG_FILE"]), os.path.dirname(CONFIG["LLM_CACHE_FILE"]), RAW_CONTENT_DIR, RELEVANT_DIR, NOT_RELEVANT_DIR]:
     os.makedirs(directory, exist_ok=True)
 
-# Clean relevant and not relevant directories
 def clean_directories(*dirs):
     for dir in dirs:
         for filename in os.listdir(dir):
@@ -65,7 +64,6 @@ def clean_directories(*dirs):
 
 clean_directories(RELEVANT_DIR, NOT_RELEVANT_DIR, RAW_CONTENT_DIR)
 
-# Configure logging
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
@@ -76,7 +74,6 @@ root_logger.setLevel(logging.INFO)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
 
-# Load or initialize the caches
 def open_cache(cache_file):
     try:
         return shelve.open(cache_file, writeback=True)
@@ -132,26 +129,27 @@ def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, so
         }
         f.write(str(metadata))
 
-def fetch_content(url):
+def fetch_content_with_browser(url):
+    options = Options()
+    options.add_argument("--incognito")
+    options.add_argument("--headless")  # Run in headless mode
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    
     try:
-        headers = {'User-Agent': CONFIG["USER_AGENT"]}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-
-        content_type = response.headers.get('Content-Type', '')
-
-        if 'text/html' in content_type:
-            try:
-                return response.content.decode('utf-8'), 'html'
-            except UnicodeDecodeError:
-                return response.content.decode('ISO-8859-1'), 'html'
-        elif 'application/pdf' in content_type:
-            return response.content, 'pdf'
-        else:
-            logging.info(f"Skipped non-HTML and non-PDF content at {url}")
-            return "", ""
-    except requests.RequestException as e:
-        logging.error(f"Failed to retrieve {url}: {e}")
+        driver.get(url)
+        time.sleep(CONFIG["REQUEST_DELAY"])  # Allow time for the page to fully load
+        page_source = driver.page_source
+        driver.quit()
+        return page_source, 'html'
+    except Exception as e:
+        logging.error(f"Failed to fetch content with browser for URL {url}: {e}")
+        driver.quit()
         return "", ""
 
 def clean_html_content(html_content):
@@ -179,28 +177,6 @@ def extract_text_from_html(cleaned_html):
     soup = BeautifulSoup(cleaned_html, 'html.parser')
     return soup.get_text(separator='\n')
 
-def extract_text_from_pdf(pdf_content):
-    try:
-        pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
-        text = ""
-        for page_num in range(pdf_document.page_count):
-            page = pdf_document.load_page(page_num)
-            page_text = page.get_text("text")
-            
-            # If the regular text extraction doesn't work well (e.g., it's mostly empty), use OCR
-            if len(page_text.strip()) < 50:
-                logging.info(f"Using OCR for page {page_num} due to insufficient text extraction.")
-                pix = page.get_pixmap()
-                img = Image.open(io.BytesIO(pix.pil_tobytes(format="png")))
-                page_text = pytesseract.image_to_string(img, config='--psm 1')
-            
-            text += page_text
-        
-        return text
-    except Exception as e:
-        logging.error(f"Error in extracting text from PDF: {e}")
-        return ""
-
 def cleanup_extracted_text(text):
     # Remove multiple empty lines
     text = re.sub(r'\n\s*\n', '\n\n', text)
@@ -208,8 +184,6 @@ def cleanup_extracted_text(text):
     text = '\n'.join([line.strip() for line in text.split('\n')])
     # Remove multiple spaces and tabs
     text = re.sub(r'\s+', ' ', text)
-    # Remove unwanted characters or artifacts from OCR
-    text = re.sub(r'\x0c', '', text)  # Remove form feed characters
     return text
 
 def evaluate_content_relevance(content, query_context, model):
@@ -232,13 +206,10 @@ def evaluate_content_relevance(content, query_context, model):
 
 def process_url(subquestion, url, model):
     logging.info(f"Fetching content for URL: {url}")
-    content, content_type = fetch_content(url)
+    content, content_type = fetch_content_with_browser(url)
     if content:
         save_raw_content(subquestion, url, content, content_type)
-        if content_type == 'pdf':
-            logging.info(f"Extracting text from PDF content for URL: {url}")
-            extracted_text = extract_text_from_pdf(content)
-        elif content_type == 'html':
+        if content_type == 'html':
             logging.info(f"Cleaning HTML content for URL: {url}")
             cleaned_html = clean_html_content(content)
             extracted_text = extract_text_from_html(cleaned_html)
@@ -291,6 +262,7 @@ def query_vector_store(collection, query, top_k=5):
 
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
     visited_urls = set()
+    domain_timestamps = {}
     all_contexts = ""
     all_references = []
     urls_to_process = []
@@ -315,13 +287,24 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     while urls_to_process or documents_to_process:
         if urls_to_process:
             current_url = urls_to_process.pop(0)
+            domain = urlparse(current_url).netloc
+            current_time = time.time()
+            
             if current_url in visited_urls:
                 continue
+
+            if domain in domain_timestamps and current_time - domain_timestamps[domain] < CONFIG["REQUEST_DELAY"]:
+                wait_time = CONFIG["REQUEST_DELAY"] - (current_time - domain_timestamps[domain])
+                logging.info(f"Waiting for {wait_time} seconds before making another request to {domain}")
+                time.sleep(wait_time)
+                current_time = time.time()  # Update current time after sleep
+
             extracted_text, reference = process_url(subquestion, current_url, model)
             if extracted_text:
                 all_contexts += f"Content from {current_url}:\n{extracted_text}\n\n"
                 all_references.append(reference)
                 visited_urls.add(current_url)
+                domain_timestamps[domain] = current_time
 
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
@@ -332,13 +315,10 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             if is_relevant:
                 all_contexts += f"Content from {source}:\n{doc}\nMetadata: {meta}\n\n"
                 all_references.append(source)
-                # Save the document as cleaned content
                 filename_hash = hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()
                 save_cleaned_content(subquestion, source, combined_context, is_relevant, reason, source="vector_store", vector_metadata=meta)
-                # Log at least 200 characters of the document text
                 logging.info(f"Document from vector store: {doc[:200]}")
 
-        # Delay between queries
         time.sleep(CONFIG["REQUEST_DELAY"])
 
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
