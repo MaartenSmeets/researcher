@@ -14,17 +14,27 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import torch
 import portalocker
 from urllib.parse import urlparse
-
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
+from transformers import AutoTokenizer, AutoModelForCausalLM, HfApi
+
+# Authenticate to HuggingFace using the token
+hf_api = HfApi()
+hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+if hf_token:
+    hf_api.set_access_token(hf_token)
+else:
+    logging.error("HuggingFace API token is not set. Please set the HUGGINGFACEHUB_API_TOKEN environment variable.")
+    exit(1)
 
 device = torch.device("cpu")
 
 # Configurable parameters
 CONFIG = {
     "MODEL": "gemma2:27b-instruct-fp16",
+    "TOKENIZER": "google/gemma-2-27b",
     "NUM_SUBQUESTIONS": 10,
     "NUM_SEARCH_RESULTS_GOOGLE": 20,
     "NUM_SEARCH_RESULTS_VECTOR": 10,
@@ -39,8 +49,13 @@ CONFIG = {
     "VECTOR_STORE_PATH": "./vector_store",
     "VECTOR_STORE_COLLECTION": "documents",
     "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
-    "TEXT_SNIPPET_LENGTH": 200
+    "TEXT_SNIPPET_LENGTH": 200,
+    "MAX_DOCUMENT_LENGTH": 2000,  # Maximum length of document before summarizing
+    "CONTEXT_LENGTH_TOKENS": 8000  # Context length in tokens for the model
 }
+
+# Define the tokenizer outside the config map
+tokenizer = AutoTokenizer.from_pretrained(CONFIG["TOKENIZER"])
 
 RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
 CLEANED_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'cleaned')
@@ -190,11 +205,12 @@ def evaluate_content_relevance(content, query_context, model):
     prompt = (
         f"Given the following query context: {query_context}\n"
         f"Evaluate the relevance and trustworthiness of the provided content. Respond strictly with 'yes' or 'no', followed by a brief and concise explanation.\n\n"
-        f"Content:\n{content[:4000]}\n"
+        f"Content:\n{content}\n"
         f"Response (yes or no):"
     )
+    truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
     logging.info(f"Evaluating content relevance for query context: {query_context[:200]}...")
-    response = generate_response_with_ollama(prompt, model)
+    response = generate_response_with_ollama(truncated_prompt, model)
     if response:
         is_relevant = response.lower().startswith("yes")
         reason = response[4:].strip()
@@ -203,6 +219,34 @@ def evaluate_content_relevance(content, query_context, model):
     else:
         logging.error("Failed to evaluate content relevance.")
         return False, "Evaluation failed"
+
+def summarize_content(content, subquestion, model):
+    prompt = (
+        f"Given the following subquestion: {subquestion}\n"
+        f"Summarize the following content, focusing on concise, factual, and relevant information that contributes to answering the subquestion.\n\n"
+        f"Content:\n{content}\n"
+        f"Summary:"
+    )
+    truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
+    logging.info(f"Summarizing content for subquestion: {subquestion[:200]}...")
+    response = generate_response_with_ollama(truncated_prompt, model)
+    if response:
+        logging.info(f"Content summary: {response[:200]}")
+        return response.strip()
+    else:
+        logging.error("Failed to summarize content.")
+        return content  # Return original content if summarization fails
+
+def truncate_content_to_fit_prompt(prompt, content):
+    prompt_tokens = tokenizer.encode(prompt, return_tensors='pt')
+    content_tokens = tokenizer.encode(content, return_tensors='pt')
+    available_tokens = CONFIG["CONTEXT_LENGTH_TOKENS"] - prompt_tokens.size(1)
+
+    if content_tokens.size(1) > available_tokens:
+        content_tokens = content_tokens[:, :available_tokens]
+
+    truncated_content = tokenizer.decode(content_tokens[0], skip_special_tokens=True)
+    return truncated_content
 
 def process_url(subquestion, url, model):
     logging.info(f"Fetching content for URL: {url}")
@@ -218,6 +262,8 @@ def process_url(subquestion, url, model):
 
         cleaned_text = cleanup_extracted_text(extracted_text)
         if cleaned_text:
+            if len(cleaned_text) > CONFIG["MAX_DOCUMENT_LENGTH"]:
+                cleaned_text = summarize_content(cleaned_text, subquestion, model)
             logging.info(f"Evaluating content relevance for URL: {url}")
             is_relevant, reason = evaluate_content_relevance(cleaned_text, subquestion, model)
             save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
@@ -238,7 +284,7 @@ def search_google_with_retries(query, num_results):
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
             return results
-        except requests.exceptions.HTTPError as e:
+        except Exception as e:
             if e.response.status_code == 429:
                 retry_after = CONFIG["INITIAL_RETRY_DELAY"] * (2 ** attempt)
                 logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
@@ -267,6 +313,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     all_references = []
     urls_to_process = []
     documents_to_process = []
+    subquestion_answers = []
 
     logging.info(f"Processing subquestion: {subquestion}")
 
@@ -303,6 +350,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             if extracted_text:
                 all_contexts += f"Content from {current_url}:\n{extracted_text}\n\n"
                 all_references.append(reference)
+                subquestion_answers.append(f"Answer from {current_url}: {extracted_text[:500]}")
                 visited_urls.add(current_url)
                 domain_timestamps[domain] = current_time
 
@@ -313,8 +361,11 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             is_relevant, reason = evaluate_content_relevance(combined_context, subquestion, model)
             source = meta.get('source', 'vector_store')
             if is_relevant:
+                if len(doc) > CONFIG["MAX_DOCUMENT_LENGTH"]:
+                    doc = summarize_content(doc, subquestion, model)
                 all_contexts += f"Content from {source}:\n{doc}\nMetadata: {meta}\n\n"
                 all_references.append(source)
+                subquestion_answers.append(f"Answer from vector store document: {doc[:500]}")
                 filename_hash = hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()
                 save_cleaned_content(subquestion, source, combined_context, is_relevant, reason, source="vector_store", vector_metadata=meta)
                 logging.info(f"Document from vector store: {doc[:200]}")
@@ -322,20 +373,22 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
         time.sleep(CONFIG["REQUEST_DELAY"])
 
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
-    return all_contexts, all_references
+    return all_contexts, all_references, subquestion_answers
 
 def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query):
     all_contexts = ""
     all_references = []
+    all_subquestion_answers = []
 
     while subquestions:
         logging.info(f"Number of subquestions to process: {len(subquestions)}")
         subquestion = subquestions.pop()
-        context, references = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
+        context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
 
         if context:
             all_contexts += context
             all_references.extend(references)
+            all_subquestion_answers.append(f"Subquestion: {subquestion}\n{subquestion_answers}")
         else:
             logging.info(f"Insufficient context, refining subquestion: {subquestion}")
             refined_subquestions = rephrase_query_to_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"])
@@ -345,13 +398,13 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
     if all_contexts:
         prompt = (
             f"Given the following context, answer the question: {original_query}\n\n"
-            f"Context provided contains both factual data and opinions:\n\n"
-            f"1. Factual data from vector store documents (reliable sources).\n"
-            f"2. Opinions and thoughts from internet sources (less reliable but still sometimes factual).\n\n"
-            f"Context:\n{all_contexts}"
+            f"Context provided contains both factual data and opinions. Use the context to formulate a comprehensive answer to the main question.\n\n"
+            f"Context:\n{all_contexts}\n\n"
+            f"Subquestions and their answers:\n{all_subquestion_answers}"
         )
-        logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}")
-        response = generate_response_with_ollama(prompt, model)
+        truncated_prompt = truncate_content_to_fit_prompt(prompt, all_contexts)
+        logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}\nSubquestions and their answers:\n{all_subquestion_answers}")
+        response = generate_response_with_ollama(truncated_prompt, model)
         logging.info(f"Output:\n{response}")
 
 def generate_response_with_ollama(prompt, model):
