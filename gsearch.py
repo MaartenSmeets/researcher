@@ -5,6 +5,7 @@ import hashlib
 import shutil
 import re
 import time
+import random
 from bs4 import BeautifulSoup
 from lxml import etree, html
 from googlesearch import search
@@ -144,6 +145,18 @@ def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, so
         }
         f.write(str(metadata))
 
+# List of user agents for rotation
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59"
+]
+
+def get_random_user_agent():
+    return random.choice(USER_AGENTS)
+
 def fetch_content_with_browser(url):
     options = Options()
     options.add_argument("--incognito")
@@ -151,14 +164,16 @@ def fetch_content_with_browser(url):
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    options.add_argument(f"user-agent={get_random_user_agent()}")
+    options.add_argument("--enable-javascript")
+    options.add_argument("--enable-cookies")
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     
     try:
         driver.get(url)
-        time.sleep(CONFIG["REQUEST_DELAY"])  # Allow time for the page to fully load
+        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay to mimic human behavior
         page_source = driver.page_source
         driver.quit()
         return page_source, 'html'
@@ -205,8 +220,7 @@ def evaluate_content_relevance(content, query_context, model):
     prompt = (
         f"Given the following query context: {query_context}\n"
         f"Evaluate the relevance and trustworthiness of the provided content. Respond strictly with 'yes' or 'no', followed by a brief and concise explanation.\n\n"
-        f"Content:\n{content}\n"
-        f"Response (yes or no):"
+        f"Content:"
     )
     truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
     logging.info(f"Evaluating content relevance for query context: {query_context[:200]}...")
@@ -219,12 +233,11 @@ def evaluate_content_relevance(content, query_context, model):
     else:
         logging.error("Failed to evaluate content relevance.")
         return False, "Evaluation failed"
-
+    
 def summarize_content(content, subquestion, model):
     prompt = (
         f"Summarize the following content focusing on key points and information relevant to the subquestion: {subquestion}\n\n"
-        f"Content:\n{content}\n"
-        f"Summary:"
+        f"Content:"
     )
     truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
     logging.info(f"Summarizing content for subquestion: {subquestion[:200]}...")
@@ -242,14 +255,15 @@ def truncate_content_to_fit_prompt(prompt, content):
     available_tokens = CONFIG["CONTEXT_LENGTH_TOKENS"] - prompt_tokens.size(1)
 
     if content_tokens.size(1) > available_tokens:
-        content_tokens = content_tokens[:, :available_tokens]
-        truncated_content = tokenizer.decode(content_tokens[0], skip_special_tokens=True)
-        logging.info("Content has been truncated.")
+        truncated_content_tokens = content_tokens[:, :available_tokens]
+        truncated_content = tokenizer.decode(truncated_content_tokens[0], skip_special_tokens=True)
+        truncated_prompt = f"{prompt}\n\n{truncated_content}"
+        logging.info("Content has been truncated to fit the prompt.")
     else:
-        truncated_content = content
-        logging.info("Original complete content is used.")
+        truncated_prompt = f"{prompt}\n\n{content}"
+        logging.info("Original complete content is used in the prompt.")
 
-    return truncated_content
+    return truncated_prompt
 
 def process_url(subquestion, url, model):
     logging.info(f"Fetching content for URL: {url}")
@@ -373,7 +387,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 save_cleaned_content(subquestion, source, combined_context, is_relevant, reason, source="vector_store", vector_metadata=meta)
                 logging.info(f"Document from vector store: {doc[:200]}")
 
-        time.sleep(CONFIG["REQUEST_DELAY"])
+        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay between processing
 
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
     return all_contexts, all_references, subquestion_answers
