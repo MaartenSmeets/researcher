@@ -22,7 +22,7 @@ from transformers import AutoTokenizer
 from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
-hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+hf_token = "?"
 if hf_token:
     login(token=hf_token)
 else:
