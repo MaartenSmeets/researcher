@@ -2,7 +2,7 @@
 
 ## Overview
 
-The provided script performs web scraping, data cleaning, and relevance evaluation for content based on user queries. It leverages various libraries and tools to fetch, process, and evaluate web content.
+The provided gsearch.py script performs web scraping, data cleaning, and relevance evaluation for content based on user queries. It leverages various libraries and tools to fetch, process, and evaluate web content.
 
 ## Functionality Breakdown
 
