@@ -18,13 +18,13 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from transformers import AutoTokenizer, AutoModelForCausalLM, HfApi
+from transformers import AutoTokenizer
+from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
-hf_api = HfApi()
 hf_token = os.getenv("HUGGINGFACEHUB_API_TOKEN")
 if hf_token:
-    hf_api.set_access_token(hf_token)
+    login(token=hf_token)
 else:
     logging.error("HuggingFace API token is not set. Please set the HUGGINGFACEHUB_API_TOKEN environment variable.")
     exit(1)
