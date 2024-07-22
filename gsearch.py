@@ -222,8 +222,7 @@ def evaluate_content_relevance(content, query_context, model):
 
 def summarize_content(content, subquestion, model):
     prompt = (
-        f"Given the following subquestion: {subquestion}\n"
-        f"Summarize the following content, focusing on concise, factual, and relevant information that contributes to answering the subquestion.\n\n"
+        f"Summarize the following content focusing on key points and information relevant to the subquestion: {subquestion}\n\n"
         f"Content:\n{content}\n"
         f"Summary:"
     )
@@ -244,8 +243,12 @@ def truncate_content_to_fit_prompt(prompt, content):
 
     if content_tokens.size(1) > available_tokens:
         content_tokens = content_tokens[:, :available_tokens]
+        truncated_content = tokenizer.decode(content_tokens[0], skip_special_tokens=True)
+        logging.info("Content has been truncated.")
+    else:
+        truncated_content = content
+        logging.info("Original complete content is used.")
 
-    truncated_content = tokenizer.decode(content_tokens[0], skip_special_tokens=True)
     return truncated_content
 
 def process_url(subquestion, url, model):
