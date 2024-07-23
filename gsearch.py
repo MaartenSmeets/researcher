@@ -18,6 +18,9 @@ from urllib.parse import urlparse
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from transformers import AutoTokenizer
 from huggingface_hub import login
@@ -174,9 +177,33 @@ def fetch_content_with_browser(url):
     driver = webdriver.Chrome(service=service, options=options)
     
     try:
+        logging.info(f"Navigating to URL: {url}")
         driver.get(url)
+        # Wait until the page is fully loaded
+        WebDriverWait(driver, CONFIG["REQUEST_DELAY"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        logging.info("Page loaded successfully")
+
+        # Handle cookie pop-up or similar pop-ups
+        try:
+            cookie_button = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((
+                    By.XPATH, 
+                    "//*[contains(text(), 'accept') or contains(text(), 'Agree') or contains(text(), 'proceed') or contains(text(), 'Allow') or contains(text(), 'Consent') or contains(text(), 'Continue') or contains(text(), 'Close') or contains(text(), 'Got it') or contains(text(), 'Ok') or contains(text(), 'Yes')]"
+                ))
+            )
+            logging.info("Found cookie pop-up button, attempting to click it")
+            cookie_button.click()
+            logging.info("Clicked cookie pop-up button, waiting for it to disappear")
+            
+            # Wait for the pop-up to disappear
+            WebDriverWait(driver, 5).until(EC.invisibility_of_element(cookie_button))
+            logging.info("Cookie pop-up disappeared successfully")
+        except Exception as e:
+            logging.info(f"No cookie pop-up found or could not click the button: {e}")
+
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay to mimic human behavior
         page_source = driver.page_source
+        logging.info("Fetched page source successfully")
         driver.quit()
         return page_source, 'html'
     except Exception as e:
@@ -238,7 +265,8 @@ def evaluate_content_relevance(content, query_context, model):
     
 def summarize_content(content, subquestion, model):
     prompt = (
-        f"Summarize the following content focusing on key points and information relevant to answering the subquestion. Do not describe the form of the content. Be concise and specific and only say what is needed: {subquestion}\n\n"
+        f"Summarize the following content to directly address the subquestion with clear and concise information. Ensure the summary is highly relevant, omits unnecessary details, and highlights key points and insights necessary for a comprehensive understanding. "
+        f"Be specific and avoid general statements. The subquestion is: {subquestion}\n\n"
         f"Content:"
     )
     truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
