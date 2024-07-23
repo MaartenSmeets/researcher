@@ -11,7 +11,9 @@ from lxml import etree, html
 from googlesearch import search
 import ollama
 import chromadb
+from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core import Document
 import torch
 import portalocker
 from urllib.parse import urlparse
@@ -22,7 +24,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from transformers import AutoTokenizer
 from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
@@ -38,7 +39,6 @@ device = torch.device("cpu")
 # Configurable parameters
 CONFIG = {
     "MODEL": "gemma2:27b-instruct-fp16",
-    "TOKENIZER": "google/gemma-2-27b",
     "NUM_SUBQUESTIONS": 10,
     "NUM_SEARCH_RESULTS_GOOGLE": 10,
     "NUM_SEARCH_RESULTS_VECTOR": 5,
@@ -55,12 +55,9 @@ CONFIG = {
     "VECTOR_STORE_COLLECTION": "documents",
     "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
     "TEXT_SNIPPET_LENGTH": 200,
-    "MAX_DOCUMENT_LENGTH": 2000,  # Maximum length of document before summarizing
-    "CONTEXT_LENGTH_TOKENS": 8000  # Context length in tokens for the model
+    "MAX_DOCUMENT_LENGTH": 2000,
+    "CONTEXT_LENGTH_TOKENS": 8000
 }
-
-# Define the tokenizer outside the config map
-tokenizer = AutoTokenizer.from_pretrained(CONFIG["TOKENIZER"])
 
 RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
 CLEANED_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'cleaned')
@@ -127,6 +124,29 @@ def save_raw_content(subquestion, url, raw_content, content_type):
             'subquestion': subquestion,
             'status': 'raw',
             'content_type': content_type
+        }
+        f.write(str(metadata))
+
+def save_chunk_content(subquestion, url, chunk, chunk_summary, is_relevant, reason, chunk_id):
+    filename_hash = hashlib.md5((subquestion + url + str(chunk_id)).encode('utf-8')).hexdigest()
+    chunk_filename = f"{filename_hash}_chunk_{chunk_id}.txt"
+    chunk_summary_filename = f"{filename_hash}_chunk_{chunk_id}_summary.txt"
+    metadata_filename = f"{filename_hash}_chunk_{chunk_id}_meta.txt"
+
+    directory = RELEVANT_DIR if is_relevant else NOT_RELEVANT_DIR
+    with open(os.path.join(RAW_CONTENT_DIR, chunk_filename), 'w', encoding='utf-8') as f:
+        f.write(chunk)
+    
+    with open(os.path.join(directory, chunk_summary_filename), 'w', encoding='utf-8') as f:
+        f.write(chunk_summary)
+
+    with open(os.path.join(directory, metadata_filename), 'w', encoding='utf-8') as f:
+        metadata = {
+            'url': url,
+            'subquestion': subquestion,
+            'status': 'relevant' if is_relevant else 'not_relevant',
+            'reason': reason,
+            'chunk_id': chunk_id
         }
         f.write(str(metadata))
 
@@ -219,7 +239,7 @@ def fetch_content_with_browser(url):
         logging.error(f"Failed to fetch content with browser for URL {url}: {e}")
         driver.quit()
         return "", ""
-        
+
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']):
@@ -257,53 +277,63 @@ def cleanup_extracted_text(text):
 def evaluate_content_relevance(content, query_context, model):
     prompt = (
         f"Given the following query context: {query_context}\n"
-        f"Evaluate the relevance and trustworthiness of the provided content. Respond strictly with 'yes' or 'no', followed by a brief and concise explanation.\n\n"
-        f"Content:"
+        f"Evaluate the relevance of the provided content. Respond with 'relevant' or 'not relevant', followed by a brief and concise explanation. "
+        f"Consider the content not relevant if it primarily consists of references to other sources for more information.\n\n"
+        f"Content: {content}"
     )
-    truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
     logging.info(f"Evaluating content relevance for query context: {query_context[:200]}...")
-    response = generate_response_with_ollama(truncated_prompt, model)
+    response = generate_response_with_ollama(prompt, model)
+    
     if response:
-        is_relevant = response.lower().startswith("yes")
-        reason = response[4:].strip()
+        response_lower = response.lower()
+        is_relevant = response_lower.startswith("relevant")
+        reason = response[response_lower.find(" "):].strip() if " " in response else "No reason provided"
         logging.info(f"Content relevance evaluation result for context {query_context[:200]}: {is_relevant}, Reason: {reason}")
         return is_relevant, reason
     else:
         logging.error("Failed to evaluate content relevance.")
         return False, "Evaluation failed"
-    
+
 def summarize_content(content, subquestion, model):
     prompt = (
-        f"Summarize the following content to answer the subquestion directly, with clear and concise information. Focus only on highly relevant details, omitting any unnecessary information. "
-        f"Highlight the key points, critical details, and insights that are crucial for a comprehensive understanding of the subquestion. "
-        f"Ensure the summary is detailed enough to include essential information relevant to the subquestion: {subquestion}\n\n"
-        f"Content:"
+        f"Summarize the following content to directly address the subquestion: '{subquestion}'. Focus on providing clear and concise information, highlighting only the most relevant details, key points, and critical insights. "
+        f"Ensure the summary is thorough enough to include essential information specifically related to the subquestion: {subquestion}\n\n"
+        f"Content: {content}"
     )
-    truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
     logging.info(f"Summarizing content for subquestion: {subquestion[:200]}...")
-    response = generate_response_with_ollama(truncated_prompt, model)
+    response = generate_response_with_ollama(prompt, model)
     if response:
         logging.info(f"Content summary: {response[:200]}")
         return response.strip()
     else:
         logging.error("Failed to summarize content.")
         return content  # Return original content if summarization fails
+   
+def split_and_process_chunks(subquestion, url, text, model):
+    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
+    splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
+    
+    document = Document(text=text)
+    nodes = splitter.build_semantic_nodes_from_documents([document])
+    
+    chunk_summaries = []
+    chunk_relevance = []
 
-def truncate_content_to_fit_prompt(prompt, content):
-    prompt_tokens = tokenizer.encode(prompt, return_tensors='pt')
-    content_tokens = tokenizer.encode(content, return_tensors='pt')
-    available_tokens = CONFIG["CONTEXT_LENGTH_TOKENS"] - prompt_tokens.size(1)
+    for chunk_id, node in enumerate(nodes, 1):
+        chunk = node.text
+        # Perform relevance check before summarizing
+        is_relevant, reason = evaluate_content_relevance(chunk, subquestion, model)
+        if is_relevant:
+            chunk_summary = summarize_content(chunk, subquestion, model)
+            save_chunk_content(subquestion, url, chunk, chunk_summary, is_relevant, reason, chunk_id)
+            chunk_summaries.append(chunk_summary)
+            chunk_relevance.append(is_relevant)
+    
+    summarized_text = " ".join(chunk_summaries)
+    is_relevant = any(chunk_relevance)
+    reason = "At least one chunk is relevant" if is_relevant else "None of the chunks are relevant"
 
-    if content_tokens.size(1) > available_tokens:
-        truncated_content_tokens = content_tokens[:, :available_tokens]
-        truncated_content = tokenizer.decode(truncated_content_tokens[0], skip_special_tokens=True)
-        truncated_prompt = f"{prompt}\n\n{truncated_content}"
-        logging.info("Content has been truncated to fit the prompt.")
-    else:
-        truncated_prompt = f"{prompt}\n\n{content}"
-        logging.info("Original complete content is used in the prompt.")
-
-    return truncated_prompt
+    return summarized_text, is_relevant, reason
 
 def process_url(subquestion, url, model):
     logging.info(f"Fetching content for URL: {url}")
@@ -326,13 +356,8 @@ def process_url(subquestion, url, model):
 
         cleaned_text = cleanup_extracted_text(extracted_text)
         if cleaned_text:
-            summarized_text = cleaned_text
-            if len(cleaned_text) > CONFIG["MAX_DOCUMENT_LENGTH"]:
-                summarized_text = summarize_content(cleaned_text, subquestion, model)
-            logging.info(f"Evaluating content relevance for URL: {url}")
-            is_relevant, reason = evaluate_content_relevance(summarized_text, subquestion, model)
+            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, model)
             save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
-            # Log at least 200 characters of the cleaned text
             logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
             return summarized_text, url
         else:
@@ -422,20 +447,15 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
-            combined_context = f"Document: {doc}\nMetadata: {meta}"
             logging.info(f"Evaluating content relevance for document from vector store with metadata.")
-            is_relevant, reason = evaluate_content_relevance(combined_context, subquestion, model)
+            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
-            if is_relevant:
-                summarized_doc = doc
-                if len(doc) > CONFIG["MAX_DOCUMENT_LENGTH"]:
-                    summarized_doc = summarize_content(doc, subquestion, model)
-                all_contexts += f"Content from {source}:\n{summarized_doc}\nMetadata: {meta}\n\n"
-                all_references.append(source)
-                subquestion_answers.append(f"Answer from vector store document: {summarized_doc[:500]}")
-                filename_hash = hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()
-                save_cleaned_content(subquestion, source, doc, summarized_doc, is_relevant, reason, source="vector_store", vector_metadata=meta)
-                logging.info(f"Document from vector store: {doc[:200]}")
+            
+            all_contexts += f"Content from {source}:\n{summarized_text}\nMetadata: {meta}\n\n"
+            all_references.append(source)
+            subquestion_answers.append(f"Answer from vector store document: {summarized_text[:500]}")
+            save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
+            logging.info(f"Document from vector store: {doc[:200]}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay between processing
 
@@ -470,9 +490,8 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             f"Context:\n{all_contexts}\n\n"
             f"Subquestions and their answers:\n{all_subquestion_answers}"
         )
-        truncated_prompt = truncate_content_to_fit_prompt(prompt, all_contexts)
         logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}\nSubquestions and their answers:\n{all_subquestion_answers}")
-        response = generate_response_with_ollama(truncated_prompt, model)
+        response = generate_response_with_ollama(prompt, model)
         logging.info(f"Output:\n{response}")
 
 def generate_response_with_ollama(prompt, model):
@@ -512,7 +531,12 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
         return []
 
 if __name__ == "__main__":
-    original_query = "Suggest several suitable level 1 to level 3 spells for a Dungeons & Dragons 5th Edition Eldritch Knight Elf who specializes in ranged combat. The character has a Dexterity score of 20 and an Intelligence score of 16. Please recommend spells exclusively from officially published D&D sources, such as the Player's Handbook, Xanathar's Guide to Everything, Tasha's Cauldron of Everything, and the Dungeon Master's Guide. Do not include any homebrew or unofficial content in your suggestions."
+    original_query = (
+        "What are some effective level 1 to level 3 spells for an Eldritch Knight Elf in Dungeons & Dragons 5th Edition "
+        "who focuses on ranged combat? Consider spells from officially published sources like the Player's Handbook, "
+        "Xanathar's Guide to Everything, Tasha's Cauldron of Everything, and the Dungeon Master's Guide. "
+        "The character has a Dexterity score of 20 and an Intelligence score of 16."
+    )
 
     logging.info(f"Starting script with original query: {original_query}")
     subquestions = rephrase_query_to_subquestions(original_query, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"])
@@ -524,4 +548,4 @@ if __name__ == "__main__":
     if google_cache:
         google_cache.close()
     if url_cache:
-        url_cache.close()
+        google_cache.close()
