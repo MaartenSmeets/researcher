@@ -565,7 +565,7 @@ def generate_search_terms(subquestion, model):
 
 if __name__ == "__main__":
     original_query = (
-        "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would enhance my character's ranged combat abilities. Include specific details and explanations for why each spell is beneficial."
+        "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial to my character. Include specific details and explanations for why each spell is beneficial."
     )
 
     logging.info(f"Starting script with original query: {original_query}")
