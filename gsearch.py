@@ -28,7 +28,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
-hf_token = "?"
+hf_token = ""
 if hf_token:
     login(token=hf_token)
 else:
@@ -196,8 +196,9 @@ def generate_response_with_ollama(prompt, model):
 
 def generate_user_agents(num_user_agents, model):
     prompt = (
-        f"Generate {num_user_agents} realistic and diverse user-agent strings for web browsers. "
-        f"Include a variety of operating systems and browser versions to simulate different types of users. "
+        f"Generate {num_user_agents} realistic and commonly used user-agent strings for web browsers. "
+        f"Include a variety of operating systems (e.g., Windows, macOS, Linux, Android, iOS) and browser versions "
+        f"(e.g., Chrome, Firefox, Safari, Edge) to simulate different types of users. "
         f"Output each user-agent string on a new line without any additional text or formatting."
     )
     response = generate_response_with_ollama(prompt, model)
