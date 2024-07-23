@@ -199,7 +199,7 @@ def fetch_content_with_browser(url):
             WebDriverWait(driver, 5).until(EC.invisibility_of_element(cookie_button))
             logging.info("Cookie pop-up disappeared successfully")
         except Exception as e:
-            logging.info(f"No cookie pop-up found or could not click the button: {e}")
+            logging.info(f"No cookie pop-up found or could not click the button: {str(e).strip()}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay to mimic human behavior
         page_source = driver.page_source
@@ -210,6 +210,7 @@ def fetch_content_with_browser(url):
         logging.error(f"Failed to fetch content with browser for URL {url}: {e}")
         driver.quit()
         return "", ""
+    
 
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -265,8 +266,9 @@ def evaluate_content_relevance(content, query_context, model):
     
 def summarize_content(content, subquestion, model):
     prompt = (
-        f"Summarize the following content to directly address the subquestion with clear and concise information. Ensure the summary is highly relevant, omits unnecessary details, and highlights key points and insights necessary for a comprehensive understanding. "
-        f"Be specific and avoid general statements. The subquestion is: {subquestion}\n\n"
+        f"Summarize the following content to answer the subquestion directly, with clear and concise information. Focus only on highly relevant details, omitting any unnecessary information. "
+        f"Highlight the key points and insights that are crucial for a comprehensive understanding of the subquestion. "
+        f"Be specific, avoid general statements, and ensure the summary is directly tied to the subquestion: {subquestion}\n\n"
         f"Content:"
     )
     truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
@@ -428,6 +430,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay between processing
 
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
+    logging.info(f"Answers gathered for subquestion '{subquestion}': {subquestion_answers}")
     return all_contexts, all_references, subquestion_answers
 
 def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query):
