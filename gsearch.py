@@ -38,7 +38,7 @@ device = torch.device("cpu")
 
 # Configurable parameters
 CONFIG = {
-    "MODEL": "gemma2:27b-instruct-fp16",
+    "MODEL": "gemma2:27b-instruct-q8_0", #"gemma2:27b-instruct-fp16",
     "NUM_SUBQUESTIONS": 10,
     "NUM_SEARCH_RESULTS_GOOGLE": 10,
     "NUM_SEARCH_RESULTS_VECTOR": 5,
@@ -276,18 +276,28 @@ def cleanup_extracted_text(text):
 
 def evaluate_content_relevance(content, query_context, model):
     prompt = (
-        f"Given the following query context: {query_context}\n"
-        f"Evaluate the relevance of the provided content. Respond with 'relevant' or 'not relevant', followed by a brief and concise explanation. "
-        f"Consider the content not relevant if it primarily consists of references to other sources for more information.\n\n"
-        f"Content: {content}"
+        f"Context: {query_context}\n\n"
+        f"Content: {content}\n\n"
+        f"Determine if the provided content is relevant to the context for answering the question. "
+        f"Relevance should be based on specific, factual information, and direct connections to the context. "
+        f"Respond with 'Relevant: [reason]' or 'Not Relevant: [reason]', providing a concise explanation for your decision, "
+        f"highlighting key points from the content that influenced your judgement."
     )
     logging.info(f"Evaluating content relevance for query context: {query_context[:200]}...")
     response = generate_response_with_ollama(prompt, model)
     
     if response:
         response_lower = response.lower()
-        is_relevant = response_lower.startswith("relevant")
-        reason = response[response_lower.find(" "):].strip() if " " in response else "No reason provided"
+        if response_lower.startswith("relevant:"):
+            is_relevant = True
+            reason = response[response_lower.find(":") + 1:].strip()
+        elif response_lower.startswith("not relevant:"):
+            is_relevant = False
+            reason = response[response_lower.find(":") + 1:].strip()
+        else:
+            is_relevant = False
+            reason = "Unclear response structure"
+        
         logging.info(f"Content relevance evaluation result for context {query_context[:200]}: {is_relevant}, Reason: {reason}")
         return is_relevant, reason
     else:
@@ -407,7 +417,10 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    results = search_google_with_retries(subquestion, num_search_results_google)
+    search_terms = generate_search_terms(subquestion, model)
+    logging.info(f"Translated search terms: {search_terms}")
+
+    results = search_google_with_retries(search_terms, num_search_results_google)
     if results:
         urls_to_process.extend(results)
 
@@ -532,12 +545,25 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
         logging.error("Failed to generate subquestions.")
         return []
 
+def generate_search_terms(subquestion, model):
+    prompt = (
+        f"Translate the following subquestion into a set of Google search terms that cover the subquestion effectively and conform to Google's search best practices and tips. "
+        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, use the minus sign to exclude unwanted terms, and consider using site-specific searches if applicable. "
+        f"Subquestion: {subquestion}"
+    )
+    logging.info(f"Generating search terms for subquestion: {subquestion}")
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        search_terms = response.strip()
+        logging.info(f"Generated search terms: {search_terms}")
+        return search_terms
+    else:
+        logging.error("Failed to generate search terms.")
+        return subquestion
+
 if __name__ == "__main__":
     original_query = (
-        "What are some effective level 1 to level 3 spells for an Eldritch Knight Elf in Dungeons & Dragons 5th Edition "
-        "who focuses on ranged combat? Consider spells from officially published sources like the Player's Handbook, "
-        "Xanathar's Guide to Everything, Tasha's Cauldron of Everything, and the Dungeon Master's Guide. "
-        "The character has a Dexterity score of 20 and an Intelligence score of 16."
+        "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would enhance my character's ranged combat abilities. Include specific details and explanations for why each spell is beneficial."
     )
 
     logging.info(f"Starting script with original query: {original_query}")
