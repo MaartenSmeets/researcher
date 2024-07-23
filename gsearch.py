@@ -9,6 +9,7 @@ import random
 from bs4 import BeautifulSoup
 from lxml import etree, html
 from googlesearch import search
+import googlesearch.user_agents
 import ollama
 import chromadb
 from llama_index.core.node_parser import SemanticSplitterNodeParser
@@ -38,7 +39,7 @@ device = torch.device("cpu")
 
 # Configurable parameters
 CONFIG = {
-    "MODEL": "gemma2:27b-instruct-q8_0", #"gemma2:27b-instruct-fp16",
+    "MODEL": "gemma2:27b-instruct-q8_0",
     "NUM_SUBQUESTIONS": 10,
     "NUM_SEARCH_RESULTS_GOOGLE": 10,
     "NUM_SEARCH_RESULTS_VECTOR": 5,
@@ -56,7 +57,8 @@ CONFIG = {
     "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
     "TEXT_SNIPPET_LENGTH": 200,
     "MAX_DOCUMENT_LENGTH": 2000,
-    "CONTEXT_LENGTH_TOKENS": 8000
+    "CONTEXT_LENGTH_TOKENS": 8000,
+    "NUM_USER_AGENTS": 10
 }
 
 RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
@@ -174,26 +176,80 @@ def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_rel
         }
         f.write(str(metadata))
 
-# List of user agents for rotation
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/91.0.864.59"
-]
+def generate_response_with_ollama(prompt, model):
+    if prompt in llm_cache:
+        logging.info(f"Using cached response for prompt: {prompt[:100]}...")
+        return llm_cache[prompt]
+    try:
+        response = ollama.generate(model=model, prompt=prompt)
+        response_content = response.get('response', "")
+        if not response_content:
+            logging.error(f"Unexpected response structure: {response}")
+            return ""
 
-def get_random_user_agent():
-    return random.choice(USER_AGENTS)
+        llm_cache[prompt] = response_content
+        save_cache(llm_cache, CONFIG["LLM_CACHE_FILE"])
+        return response_content
+    except Exception as e:
+        logging.error(f"Failed to generate response with Ollama: {e}")
+        return ""
+
+def generate_user_agents(num_user_agents, model):
+    prompt = (
+        f"Generate {num_user_agents} realistic and diverse user-agent strings for web browsers. "
+        f"Include a variety of operating systems and browser versions to simulate different types of users. "
+        f"Output each user-agent string on a new line without any additional text or formatting."
+    )
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        user_agents = [ua.strip() for ua in response.split('\n') if ua.strip()]
+        return user_agents
+    else:
+        logging.error("Failed to generate user agents.")
+        return []
+
+class UserAgentManager:
+    def __init__(self, model, num_user_agents):
+        self.model = model
+        self.num_user_agents = num_user_agents
+        self.user_agents = []
+        self.current_index = 0
+        logging.info(f"Initializing UserAgentManager with model {self.model} and {self.num_user_agents} user agents.")
+        self._generate_user_agents()
+
+    def _generate_user_agents(self):
+        logging.info("Generating new user agents...")
+        self.user_agents = generate_user_agents(self.num_user_agents, self.model)
+        self.current_index = 0
+        if self.user_agents:
+            logging.info(f"Generated {len(self.user_agents)} new user agents.")
+        else:
+            logging.error("Failed to generate new user agents.")
+
+    def get_next_user_agent(self):
+        if not self.user_agents or self.current_index >= len(self.user_agents):
+            logging.warning("User agent list is empty or index out of range, regenerating user agents.")
+            self._generate_user_agents()
+        if self.user_agents:
+            user_agent = self.user_agents[self.current_index]
+            self.current_index += 1
+            logging.info(f"Returning user agent: {user_agent}")
+            return user_agent
+        else:
+            logging.error("Failed to get a new user agent. User agent list is empty after regeneration.")
+            return None
+
+
+user_agent_manager = UserAgentManager(CONFIG["MODEL"], CONFIG["NUM_USER_AGENTS"])
 
 def fetch_content_with_browser(url):
     options = Options()
     options.add_argument("--incognito")
-    options.add_argument("--headless")  # Run in headless mode
+    options.add_argument("--headless")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"user-agent={get_random_user_agent()}")
+    options.add_argument(f"user-agent={user_agent_manager.get_next_user_agent()}")
     options.add_argument("--enable-javascript")
     options.add_argument("--enable-cookies")
 
@@ -203,11 +259,9 @@ def fetch_content_with_browser(url):
     try:
         logging.info(f"Navigating to URL: {url}")
         driver.get(url)
-        # Wait until the page is fully loaded
         WebDriverWait(driver, CONFIG["REQUEST_DELAY"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         logging.info("Page loaded successfully")
 
-        # Handle cookie pop-up or similar pop-ups
         try:
             cookie_buttons = WebDriverWait(driver, 5).until(
                 EC.presence_of_all_elements_located((
@@ -222,7 +276,6 @@ def fetch_content_with_browser(url):
                         cookie_button.click()
                         logging.info("Clicked cookie pop-up button, waiting for it to disappear")
                         
-                        # Wait for the pop-up to disappear
                         WebDriverWait(driver, 5).until(EC.invisibility_of_element(cookie_button))
                         logging.info("Cookie pop-up disappeared successfully")
                 except Exception as e:
@@ -230,7 +283,7 @@ def fetch_content_with_browser(url):
         except Exception as e:
             logging.info(f"No cookie pop-up found or could not locate buttons: {str(e).strip()}")
 
-        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay to mimic human behavior
+        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
         page_source = driver.page_source
         logging.info("Fetched page source successfully")
         driver.quit()
@@ -266,11 +319,8 @@ def extract_text_from_html(cleaned_html):
     return soup.get_text(separator='\n')
 
 def cleanup_extracted_text(text):
-    # Remove multiple empty lines
     text = re.sub(r'\n\s*\n', '\n\n', text)
-    # Remove leading and trailing spaces from each line
     text = '\n'.join([line.strip() for line in text.split('\n')])
-    # Remove multiple spaces and tabs
     text = re.sub(r'\s+', ' ', text)
     return text
 
@@ -317,8 +367,8 @@ def summarize_content(content, subquestion, model):
         return response.strip()
     else:
         logging.error("Failed to summarize content.")
-        return content  # Return original content if summarization fails
-   
+        return content
+
 def split_and_process_chunks(subquestion, url, text, model):
     embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
     splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
@@ -331,7 +381,6 @@ def split_and_process_chunks(subquestion, url, text, model):
 
     for chunk_id, node in enumerate(nodes, 1):
         chunk = node.text
-        # Perform relevance check before summarizing
         is_relevant, reason = evaluate_content_relevance(chunk, subquestion, model)
         if is_relevant:
             chunk_summary = summarize_content(chunk, subquestion, model)
@@ -380,7 +429,9 @@ def search_google_with_retries(query, num_results):
             if query in google_cache:
                 logging.info(f"Using cached Google search results for query: {query}")
                 return google_cache[query]
-            results = list(search(query, num_results=num_results))  # Convert generator to list
+            
+            googlesearch.user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
+            results = list(search(query, num_results=num_results))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
             return results
@@ -404,6 +455,44 @@ def query_vector_store(collection, query, top_k=5):
         return results
     except Exception as e:
         logging.error(f"Failed to query vector store: {e}")
+        return []
+
+def generate_search_terms(subquestion, model):
+    prompt = (
+        f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
+        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
+        f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
+        f"Subquestion: {subquestion}"
+    )
+
+    logging.info(f"Generating search terms for subquestion: {subquestion}")
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        search_terms = response.strip()
+        logging.info(f"Generated search terms: {search_terms}")
+        return search_terms
+    else:
+        logging.error("Failed to generate search terms.")
+        return subquestion
+
+def rephrase_query_to_subquestions(query, model, num_subquestions):
+    prompt = (
+        f"Given the following main question: {query}\n\n"
+        f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
+        f"Ensure the subquestions collectively address all aspects of the main question. "
+        f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
+        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. "
+        f"Only reply with the subquestions, each on a new line without using a list format."
+    )
+    logging.info(f"Requesting rephrased subquestions for query: {query}")
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        subquestions = response.split('\n')
+        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        logging.info(f"Rephrased subquestions: {unique_subquestions}")
+        return unique_subquestions
+    else:
+        logging.error("Failed to generate subquestions.")
         return []
 
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
@@ -448,7 +537,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 wait_time = CONFIG["REQUEST_DELAY"] - (current_time - domain_timestamps[domain])
                 logging.info(f"Waiting for {wait_time} seconds before making another request to {domain}")
                 time.sleep(wait_time)
-                current_time = time.time()  # Update current time after sleep
+                current_time = time.time()
 
             extracted_text, reference = process_url(subquestion, current_url, model)
             if extracted_text:
@@ -470,7 +559,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
             logging.info(f"Document from vector store: {doc[:200]}")
 
-        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay between processing
+        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
 
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
     logging.info(f"Answers gathered for subquestion '{subquestion}': {subquestion_answers}")
@@ -506,62 +595,6 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
         logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}\nSubquestions and their answers:\n{all_subquestion_answers}")
         response = generate_response_with_ollama(prompt, model)
         logging.info(f"Output:\n{response}")
-
-def generate_response_with_ollama(prompt, model):
-    if prompt in llm_cache:
-        logging.info(f"Using cached response for prompt: {prompt[:100]}...")
-        return llm_cache[prompt]
-    try:
-        response = ollama.generate(model=model, prompt=prompt)
-        response_content = response.get('response', "")
-        if not response_content:
-            logging.error(f"Unexpected response structure: {response}")
-            return ""
-
-        llm_cache[prompt] = response_content
-        save_cache(llm_cache, CONFIG["LLM_CACHE_FILE"])
-        return response_content
-    except Exception as e:
-        logging.error(f"Failed to generate response with Ollama: {e}")
-        return ""
-
-def rephrase_query_to_subquestions(query, model, num_subquestions):
-    prompt = (
-        f"Given the following main question: {query}\n\n"
-        f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
-        f"Ensure the subquestions collectively address all aspects of the main question. "
-        f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
-        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. "
-        f"Only reply with the subquestions, each on a new line without using a list format."
-    )
-    logging.info(f"Requesting rephrased subquestions for query: {query}")
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        subquestions = response.split('\n')
-        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
-        logging.info(f"Rephrased subquestions: {unique_subquestions}")
-        return unique_subquestions
-    else:
-        logging.error("Failed to generate subquestions.")
-        return []
-
-def generate_search_terms(subquestion, model):
-    prompt = (
-        f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
-        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
-        f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
-        f"Subquestion: {subquestion}"
-    )
-
-    logging.info(f"Generating search terms for subquestion: {subquestion}")
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        search_terms = response.strip()
-        logging.info(f"Generated search terms: {search_terms}")
-        return search_terms
-    else:
-        logging.error("Failed to generate search terms.")
-        return subquestion
 
 if __name__ == "__main__":
     original_query = (
