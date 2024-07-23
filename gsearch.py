@@ -547,10 +547,12 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
 
 def generate_search_terms(subquestion, model):
     prompt = (
-        f"Translate the following subquestion into a set of Google search terms that cover the subquestion effectively and conform to Google's search best practices and tips. "
-        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, use the minus sign to exclude unwanted terms, and consider using site-specific searches if applicable. "
+        f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
+        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
+        f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
         f"Subquestion: {subquestion}"
     )
+
     logging.info(f"Generating search terms for subquestion: {subquestion}")
     response = generate_response_with_ollama(prompt, model)
     if response:
