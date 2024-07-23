@@ -525,6 +525,7 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
     if response:
         subquestions = response.split('\n')
         unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        logging.info(f"Rephrased subquestions: {unique_subquestions}")
         return unique_subquestions
     else:
         logging.error("Failed to generate subquestions.")
