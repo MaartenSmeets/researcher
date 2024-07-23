@@ -515,8 +515,9 @@ def generate_response_with_ollama(prompt, model):
 def rephrase_query_to_subquestions(query, model, num_subquestions):
     prompt = (
         f"Given the following main question: {query}\n\n"
-        f"Generate {num_subquestions} concise subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or main question. "
-        f"Include sufficient information and keywords to make the answer likely relevant to the main question. "
+        f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
+        f"Ensure the subquestions collectively address all aspects of the main question. "
+        f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
         f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. "
         f"Only reply with the subquestions, each on a new line without using a list format."
     )
