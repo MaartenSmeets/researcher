@@ -130,14 +130,18 @@ def save_raw_content(subquestion, url, raw_content, content_type):
         }
         f.write(str(metadata))
 
-def save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason, source="web", vector_metadata=None):
+def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason, source="web", vector_metadata=None):
     filename_hash = hashlib.md5((subquestion + url).encode('utf-8')).hexdigest()
     cleaned_filename = f"{filename_hash}_cleaned.txt"
+    summarized_filename = f"{filename_hash}_summarized.txt"
     metadata_filename = f"{filename_hash}_cleaned_meta.txt"
 
     directory = RELEVANT_DIR if is_relevant else NOT_RELEVANT_DIR
     with open(os.path.join(directory, cleaned_filename), 'w', encoding='utf-8') as f:
         f.write(cleaned_text)
+    
+    with open(os.path.join(directory, summarized_filename), 'w', encoding='utf-8') as f:
+        f.write(summarized_text)
 
     with open(os.path.join(directory, metadata_filename), 'w', encoding='utf-8') as f:
         metadata = {
@@ -185,21 +189,26 @@ def fetch_content_with_browser(url):
 
         # Handle cookie pop-up or similar pop-ups
         try:
-            cookie_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((
+            cookie_buttons = WebDriverWait(driver, 5).until(
+                EC.presence_of_all_elements_located((
                     By.XPATH, 
-                    "//*[contains(text(), 'accept') or contains(text(), 'Agree') or contains(text(), 'proceed') or contains(text(), 'Allow') or contains(text(), 'Consent') or contains(text(), 'Continue') or contains(text(), 'Close') or contains(text(), 'Got it') or contains(text(), 'Ok') or contains(text(), 'Yes')]"
+                    "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'proceed') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
                 ))
             )
-            logging.info("Found cookie pop-up button, attempting to click it")
-            cookie_button.click()
-            logging.info("Clicked cookie pop-up button, waiting for it to disappear")
-            
-            # Wait for the pop-up to disappear
-            WebDriverWait(driver, 5).until(EC.invisibility_of_element(cookie_button))
-            logging.info("Cookie pop-up disappeared successfully")
+            for cookie_button in cookie_buttons:
+                try:
+                    if WebDriverWait(driver, 5).until(EC.element_to_be_clickable(cookie_button)):
+                        logging.info("Found clickable cookie pop-up button, attempting to click it")
+                        cookie_button.click()
+                        logging.info("Clicked cookie pop-up button, waiting for it to disappear")
+                        
+                        # Wait for the pop-up to disappear
+                        WebDriverWait(driver, 5).until(EC.invisibility_of_element(cookie_button))
+                        logging.info("Cookie pop-up disappeared successfully")
+                except Exception as e:
+                    logging.info(f"Could not click the button: {str(e).strip()}")
         except Exception as e:
-            logging.info(f"No cookie pop-up found or could not click the button: {str(e).strip()}")
+            logging.info(f"No cookie pop-up found or could not locate buttons: {str(e).strip()}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay to mimic human behavior
         page_source = driver.page_source
@@ -210,8 +219,7 @@ def fetch_content_with_browser(url):
         logging.error(f"Failed to fetch content with browser for URL {url}: {e}")
         driver.quit()
         return "", ""
-    
-
+        
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']):
@@ -267,8 +275,8 @@ def evaluate_content_relevance(content, query_context, model):
 def summarize_content(content, subquestion, model):
     prompt = (
         f"Summarize the following content to answer the subquestion directly, with clear and concise information. Focus only on highly relevant details, omitting any unnecessary information. "
-        f"Highlight the key points and insights that are crucial for a comprehensive understanding of the subquestion. "
-        f"Be specific, avoid general statements, and ensure the summary is directly tied to the subquestion: {subquestion}\n\n"
+        f"Highlight the key points, critical details, and insights that are crucial for a comprehensive understanding of the subquestion. "
+        f"Ensure the summary is detailed enough to include essential information relevant to the subquestion: {subquestion}\n\n"
         f"Content:"
     )
     truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
@@ -318,16 +326,17 @@ def process_url(subquestion, url, model):
 
         cleaned_text = cleanup_extracted_text(extracted_text)
         if cleaned_text:
+            summarized_text = cleaned_text
             if len(cleaned_text) > CONFIG["MAX_DOCUMENT_LENGTH"]:
-                cleaned_text = summarize_content(cleaned_text, subquestion, model)
+                summarized_text = summarize_content(cleaned_text, subquestion, model)
             logging.info(f"Evaluating content relevance for URL: {url}")
-            is_relevant, reason = evaluate_content_relevance(cleaned_text, subquestion, model)
-            save_cleaned_content(subquestion, url, cleaned_text, is_relevant, reason)
+            is_relevant, reason = evaluate_content_relevance(summarized_text, subquestion, model)
+            save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
             # Log at least 200 characters of the cleaned text
             logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
-            return cleaned_text, url
+            return summarized_text, url
         else:
-            save_cleaned_content(subquestion, url, "", False, "Failed to extract cleaned text")
+            save_cleaned_content(subquestion, url, "", "", False, "Failed to extract cleaned text")
     return "", ""
 
 def search_google_with_retries(query, num_results):
@@ -418,13 +427,14 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             is_relevant, reason = evaluate_content_relevance(combined_context, subquestion, model)
             source = meta.get('source', 'vector_store')
             if is_relevant:
+                summarized_doc = doc
                 if len(doc) > CONFIG["MAX_DOCUMENT_LENGTH"]:
-                    doc = summarize_content(doc, subquestion, model)
-                all_contexts += f"Content from {source}:\n{doc}\nMetadata: {meta}\n\n"
+                    summarized_doc = summarize_content(doc, subquestion, model)
+                all_contexts += f"Content from {source}:\n{summarized_doc}\nMetadata: {meta}\n\n"
                 all_references.append(source)
-                subquestion_answers.append(f"Answer from vector store document: {doc[:500]}")
+                subquestion_answers.append(f"Answer from vector store document: {summarized_doc[:500]}")
                 filename_hash = hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()
-                save_cleaned_content(subquestion, source, combined_context, is_relevant, reason, source="vector_store", vector_metadata=meta)
+                save_cleaned_content(subquestion, source, doc, summarized_doc, is_relevant, reason, source="vector_store", vector_metadata=meta)
                 logging.info(f"Document from vector store: {doc[:200]}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))  # Random delay between processing
