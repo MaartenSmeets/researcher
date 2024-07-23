@@ -23,7 +23,7 @@ from transformers import AutoTokenizer
 from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
-hf_token = "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"
+hf_token = "?"
 if hf_token:
     login(token=hf_token)
 else:
@@ -42,6 +42,7 @@ CONFIG = {
     "LOG_FILE": 'logs/app.log',
     "LLM_CACHE_FILE": 'cache/llm_cache.db',
     "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
+    "URL_CACHE_FILE": 'cache/url_cache.db',
     "EXTRACTED_CONTENT_DIR": 'extracted_content',
     "REQUEST_DELAY": 5,
     "INITIAL_RETRY_DELAY": 60,
@@ -99,6 +100,7 @@ def open_cache(cache_file):
 
 llm_cache = open_cache(CONFIG["LLM_CACHE_FILE"])
 google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE"])
+url_cache = open_cache(CONFIG["URL_CACHE_FILE"])
 
 def save_cache(cache, cache_file):
     try:
@@ -236,7 +238,7 @@ def evaluate_content_relevance(content, query_context, model):
     
 def summarize_content(content, subquestion, model):
     prompt = (
-        f"Summarize the following content focusing on key points and information relevant to the subquestion: {subquestion}\n\n"
+        f"Summarize the following content focusing on key points and information relevant to answering the subquestion. Do not describe the form of the content. Be concise and specific and only say what is needed: {subquestion}\n\n"
         f"Content:"
     )
     truncated_prompt = truncate_content_to_fit_prompt(prompt, content)
@@ -267,7 +269,14 @@ def truncate_content_to_fit_prompt(prompt, content):
 
 def process_url(subquestion, url, model):
     logging.info(f"Fetching content for URL: {url}")
-    content, content_type = fetch_content_with_browser(url)
+    if url in url_cache:
+        logging.info(f"Using cached content for URL: {url}")
+        content, content_type = url_cache[url]
+    else:
+        content, content_type = fetch_content_with_browser(url)
+        url_cache[url] = (content, content_type)
+        save_cache(url_cache, CONFIG["URL_CACHE_FILE"])
+    
     if content:
         save_raw_content(subquestion, url, content, content_type)
         if content_type == 'html':
@@ -338,13 +347,14 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     if results:
         urls_to_process.extend(results)
 
-    vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_PATH"])
-    collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION"])
-    vector_results = query_vector_store(collection, subquestion, top_k=num_search_results_vector)
+    if os.path.exists(CONFIG["VECTOR_STORE_PATH"]):
+        vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_PATH"])
+        collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION"])
+        vector_results = query_vector_store(collection, subquestion, top_k=num_search_results_vector)
     
-    for docs, metas in zip(vector_results['documents'], vector_results['metadatas']):
-        for doc, meta in zip(docs, metas):
-            documents_to_process.append((doc, meta))
+        for docs, metas in zip(vector_results['documents'], vector_results['metadatas']):
+            for doc, meta in zip(docs, metas):
+                documents_to_process.append((doc, meta))
 
     logging.info(f"Initial items to process: URLs = {len(urls_to_process)}, Documents = {len(documents_to_process)}")
 
@@ -472,3 +482,5 @@ if __name__ == "__main__":
         llm_cache.close()
     if google_cache:
         google_cache.close()
+    if url_cache:
+        url_cache.close()
