@@ -372,27 +372,26 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         f"Determine if the provided content is relevant to the context for answering the subquestion. "
         f"Relevance should be based on specific, factual information. "
         f"Then, if relevant, provide a concise summary of the content focusing on key points related to the subquestion. "
-        f"Provide the response in the following JSON format:\n"
-        f"{{\n"
-        f"  \"relevant\": <true/false>,\n"
-        f"  \"reason\": \"<reason for relevance>\",\n"
-        f"  \"summary\": \"<concise summary if relevant>\"\n"
-        f"}}"
+        f"Provide the response in the following plain JSON format without any Markdown formatting:\n"
+        f'{{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise summary if relevant>"\n}}'
     )
     logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
     response = generate_response_with_ollama(prompt, model)
 
     if response:
+        logging.debug(f"Model response: {response}")
+        # Strip Markdown-like formatting if present
+        response = response.strip('```json').strip('```').strip()
         try:
             result = json.loads(response)
             is_relevant = result.get("relevant", False)
             reason = result.get("reason", "No reason provided")
-            summary = result.get("summary", "")
+            summary = result.get("summary", "") or ""  # Ensure summary is a string
 
             logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
             return is_relevant, reason, summary
         except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON response: {e}")
+            logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
             return False, "Failed to parse JSON response", ""
     else:
         logging.error("Failed to evaluate and summarize content.")
