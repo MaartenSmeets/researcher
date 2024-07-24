@@ -58,7 +58,8 @@ CONFIG = {
     "TEXT_SNIPPET_LENGTH": 200,
     "MAX_DOCUMENT_LENGTH": 2000,
     "CONTEXT_LENGTH_TOKENS": 8000,
-    "NUM_USER_AGENTS": 10
+    "NUM_USER_AGENTS": 10,
+    "OUTPUT_DIR": "output"
 }
 
 RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
@@ -66,7 +67,7 @@ CLEANED_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'cleaned')
 RELEVANT_DIR = os.path.join(CLEANED_CONTENT_DIR, 'relevant')
 NOT_RELEVANT_DIR = os.path.join(CLEANED_CONTENT_DIR, 'not_relevant')
 
-for directory in [os.path.dirname(CONFIG["LOG_FILE"]), os.path.dirname(CONFIG["LLM_CACHE_FILE"]), RAW_CONTENT_DIR, RELEVANT_DIR, NOT_RELEVANT_DIR]:
+for directory in [os.path.dirname(CONFIG["LOG_FILE"]), os.path.dirname(CONFIG["LLM_CACHE_FILE"]), RAW_CONTENT_DIR, RELEVANT_DIR, NOT_RELEVANT_DIR, CONFIG["OUTPUT_DIR"]]:
     os.makedirs(directory, exist_ok=True)
 
 def clean_directories(*dirs):
@@ -176,30 +177,27 @@ def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_rel
         }
         f.write(str(metadata))
 
+def save_to_file(output_dir, filename, content):
+    with open(os.path.join(output_dir, filename), 'w', encoding='utf-8') as f:
+        f.write(content)
+
 def save_final_output(main_question, subquestions, contexts, answers):
     # Create directory structure based on the main question hash
     main_question_hash = hashlib.md5(main_question.encode('utf-8')).hexdigest()
-    output_dir = os.path.join("output", main_question_hash)
+    output_dir = os.path.join(CONFIG["OUTPUT_DIR"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     
     # Save main question
-    with open(os.path.join(output_dir, "main_question.txt"), 'w', encoding='utf-8') as f:
-        f.write(main_question)
+    save_to_file(output_dir, "main_question.txt", main_question)
     
     # Save subquestions
-    subquestions_file = os.path.join(output_dir, "subquestions.txt")
-    with open(subquestions_file, 'w', encoding='utf-8') as f:
-        for subquestion in subquestions:
-            f.write(f"{subquestion}\n")
+    subquestions_content = "\n".join(subquestions)
+    save_to_file(output_dir, "subquestions.txt", subquestions_content)
     
     # Save contexts and answers
     for i, (context, answer) in enumerate(zip(contexts, answers)):
-        context_file = os.path.join(output_dir, f"context_{i+1}.txt")
-        answer_file = os.path.join(output_dir, f"answer_{i+1}.txt")
-        with open(context_file, 'w', encoding='utf-8') as f:
-            f.write(context)
-        with open(answer_file, 'w', encoding='utf-8') as f:
-            f.write(answer)
+        save_to_file(output_dir, f"context_{i+1}.txt", context)
+        save_to_file(output_dir, f"answer_{i+1}.txt", answer)
 
 def generate_response_with_ollama(prompt, model):
     if prompt in llm_cache:
@@ -534,6 +532,10 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     logging.info(f"Processing subquestion: {subquestion}")
 
+    # Save subquestion to file
+    subquestion_filename = f"subquestion_{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}.txt"
+    save_to_file(CONFIG["OUTPUT_DIR"], subquestion_filename, subquestion)
+
     search_terms = generate_search_terms(subquestion, model)
     logging.info(f"Translated search terms: {search_terms}")
 
@@ -569,6 +571,9 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
             extracted_text, reference = process_url(subquestion, current_url, model)
             if extracted_text:
+                context_filename = f"context_{hashlib.md5((subquestion + current_url).encode('utf-8')).hexdigest()}.txt"
+                save_to_file(CONFIG["OUTPUT_DIR"], context_filename, extracted_text)
+
                 all_contexts += f"Content from {current_url}:\n{extracted_text}\n\n"
                 all_references.append(reference)
                 subquestion_answers.append(f"Answer from {current_url}: {extracted_text[:500]}")
@@ -581,6 +586,9 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
             
+            context_filename = f"context_{hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()}.txt"
+            save_to_file(CONFIG["OUTPUT_DIR"], context_filename, summarized_text)
+
             all_contexts += f"Content from {source}:\n{summarized_text}\nMetadata: {meta}\n\n"
             all_references.append(source)
             subquestion_answers.append(f"Answer from vector store document: {summarized_text[:500]}")
@@ -591,6 +599,10 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
     logging.info(f"Answers gathered for subquestion '{subquestion}': {subquestion_answers}")
+
+    subquestion_answer_filename = f"answer_{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}.txt"
+    save_to_file(CONFIG["OUTPUT_DIR"], subquestion_answer_filename, "\n".join(subquestion_answers))
+
     return all_contexts, all_references, subquestion_answers
 
 def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query):
