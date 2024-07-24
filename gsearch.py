@@ -28,7 +28,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from huggingface_hub import login
 
 # Authenticate to HuggingFace using the token
-hf_token = ""
+hf_token = "?"
 if hf_token:
     login(token=hf_token)
 else:
@@ -176,6 +176,31 @@ def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_rel
         }
         f.write(str(metadata))
 
+def save_final_output(main_question, subquestions, contexts, answers):
+    # Create directory structure based on the main question hash
+    main_question_hash = hashlib.md5(main_question.encode('utf-8')).hexdigest()
+    output_dir = os.path.join("output", main_question_hash)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save main question
+    with open(os.path.join(output_dir, "main_question.txt"), 'w', encoding='utf-8') as f:
+        f.write(main_question)
+    
+    # Save subquestions
+    subquestions_file = os.path.join(output_dir, "subquestions.txt")
+    with open(subquestions_file, 'w', encoding='utf-8') as f:
+        for subquestion in subquestions:
+            f.write(f"{subquestion}\n")
+    
+    # Save contexts and answers
+    for i, (context, answer) in enumerate(zip(contexts, answers)):
+        context_file = os.path.join(output_dir, f"context_{i+1}.txt")
+        answer_file = os.path.join(output_dir, f"answer_{i+1}.txt")
+        with open(context_file, 'w', encoding='utf-8') as f:
+            f.write(context)
+        with open(answer_file, 'w', encoding='utf-8') as f:
+            f.write(answer)
+
 def generate_response_with_ollama(prompt, model):
     if prompt in llm_cache:
         logging.info(f"Using cached response for prompt: {prompt[:100]}...")
@@ -240,10 +265,9 @@ class UserAgentManager:
             logging.error("Failed to get a new user agent. User agent list is empty after regeneration.")
             return None
 
-
 user_agent_manager = UserAgentManager(CONFIG["MODEL"], CONFIG["NUM_USER_AGENTS"])
 
-def fetch_content_with_browser(url):
+def init_browser():
     options = Options()
     options.add_argument("--incognito")
     options.add_argument("--headless")
@@ -256,15 +280,31 @@ def fetch_content_with_browser(url):
 
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
-    
+    return driver
+
+browser = None
+
+def ensure_browser():
+    global browser
+    if browser is None or not browser.service.is_connectable():
+        logging.info("Initializing new browser instance.")
+        if browser is not None:
+            try:
+                browser.quit()
+            except Exception as e:
+                logging.error(f"Failed to quit the browser: {e}")
+        browser = init_browser()
+
+def fetch_content_with_browser(url):
+    ensure_browser()
     try:
         logging.info(f"Navigating to URL: {url}")
-        driver.get(url)
-        WebDriverWait(driver, CONFIG["REQUEST_DELAY"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        browser.get(url)
+        WebDriverWait(browser, CONFIG["REQUEST_DELAY"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         logging.info("Page loaded successfully")
 
         try:
-            cookie_buttons = WebDriverWait(driver, 5).until(
+            cookie_buttons = WebDriverWait(browser, 5).until(
                 EC.presence_of_all_elements_located((
                     By.XPATH, 
                     "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'proceed') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
@@ -272,26 +312,24 @@ def fetch_content_with_browser(url):
             )
             for cookie_button in cookie_buttons:
                 try:
-                    if WebDriverWait(driver, 5).until(EC.element_to_be_clickable(cookie_button)):
+                    if WebDriverWait(browser, 5).until(EC.element_to_be_clickable(cookie_button)):
                         logging.info("Found clickable cookie pop-up button, attempting to click it")
                         cookie_button.click()
                         logging.info("Clicked cookie pop-up button, waiting for it to disappear")
                         
-                        WebDriverWait(driver, 5).until(EC.invisibility_of_element(cookie_button))
+                        WebDriverWait(browser, 5).until(EC.invisibility_of_element(cookie_button))
                         logging.info("Cookie pop-up disappeared successfully")
                 except Exception as e:
-                    logging.info(f"Could not click the button: {str(e).strip()}")
+                    logging.info(f"Could not click the button")
         except Exception as e:
-            logging.info(f"No cookie pop-up found or could not locate buttons: {str(e).strip()}")
+            logging.info(f"No cookie pop-up found or could not locate buttons")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
-        page_source = driver.page_source
+        page_source = browser.page_source
         logging.info("Fetched page source successfully")
-        driver.quit()
         return page_source, 'html'
     except Exception as e:
         logging.error(f"Failed to fetch content with browser for URL {url}: {e}")
-        driver.quit()
         return "", ""
 
 def clean_html_content(html_content):
@@ -325,50 +363,40 @@ def cleanup_extracted_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text
 
-def evaluate_content_relevance(content, query_context, model):
+def evaluate_and_summarize_content(content, query_context, subquestion, model):
     prompt = (
         f"Context: {query_context}\n\n"
         f"Content: {content}\n\n"
-        f"Determine if the provided content is relevant to the context for answering the question. "
+        f"Subquestion: {subquestion}\n\n"
+        f"Determine if the provided content is relevant to the context for answering the subquestion. "
         f"Relevance should be based on specific, factual information, and direct connections to the context. "
-        f"Respond with 'Relevant: [reason]' or 'Not Relevant: [reason]', providing a concise explanation for your decision, "
-        f"highlighting key points from the content that influenced your judgement."
+        f"Then, if relevant, provide a concise summary of the content focusing on key points and critical insights related to the subquestion. "
+        f"Respond with 'Relevant: [reason]\n\nSummary: [summary]' or 'Not Relevant: [reason]'."
     )
-    logging.info(f"Evaluating content relevance for query context: {query_context[:200]}...")
+    logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
     response = generate_response_with_ollama(prompt, model)
     
     if response:
         response_lower = response.lower()
         if response_lower.startswith("relevant:"):
             is_relevant = True
-            reason = response[response_lower.find(":") + 1:].strip()
+            split_response = response.split('\n\nSummary:')
+            reason = split_response[0][response_lower.find(":") + 1:].strip()
+            summary = split_response[1].strip() if len(split_response) > 1 else ""
         elif response_lower.startswith("not relevant:"):
             is_relevant = False
             reason = response[response_lower.find(":") + 1:].strip()
+            summary = ""
         else:
             is_relevant = False
             reason = "Unclear response structure"
+            summary = ""
         
-        logging.info(f"Content relevance evaluation result for context {query_context[:200]}: {is_relevant}, Reason: {reason}")
-        return is_relevant, reason
+        logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
+        return is_relevant, reason, summary
     else:
-        logging.error("Failed to evaluate content relevance.")
-        return False, "Evaluation failed"
-
-def summarize_content(content, subquestion, model):
-    prompt = (
-        f"Summarize the following content to directly address the subquestion: '{subquestion}'. Focus on providing clear and concise information, highlighting only the most relevant details, key points, and critical insights. "
-        f"Ensure the summary is thorough enough to include essential information specifically related to the subquestion: {subquestion}\n\n"
-        f"Content: {content}"
-    )
-    logging.info(f"Summarizing content for subquestion: {subquestion[:200]}...")
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        logging.info(f"Content summary: {response[:200]}")
-        return response.strip()
-    else:
-        logging.error("Failed to summarize content.")
-        return content
+        logging.error("Failed to evaluate and summarize content.")
+        return False, "Evaluation failed", ""
 
 def split_and_process_chunks(subquestion, url, text, model):
     embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
@@ -382,11 +410,10 @@ def split_and_process_chunks(subquestion, url, text, model):
 
     for chunk_id, node in enumerate(nodes, 1):
         chunk = node.text
-        is_relevant, reason = evaluate_content_relevance(chunk, subquestion, model)
+        is_relevant, reason, summary = evaluate_and_summarize_content(chunk, subquestion, subquestion, model)
         if is_relevant:
-            chunk_summary = summarize_content(chunk, subquestion, model)
-            save_chunk_content(subquestion, url, chunk, chunk_summary, is_relevant, reason, chunk_id)
-            chunk_summaries.append(chunk_summary)
+            save_chunk_content(subquestion, url, chunk, summary, is_relevant, reason, chunk_id)
+            chunk_summaries.append(summary)
             chunk_relevance.append(is_relevant)
     
     summarized_text = " ".join(chunk_summaries)
@@ -597,6 +624,8 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
         response = generate_response_with_ollama(prompt, model)
         logging.info(f"Output:\n{response}")
 
+        save_final_output(original_query, subquestions, all_contexts, response)
+        
 if __name__ == "__main__":
     original_query = (
         "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
@@ -613,3 +642,5 @@ if __name__ == "__main__":
         google_cache.close()
     if url_cache:
         google_cache.close()
+    if browser:
+        browser.quit()
