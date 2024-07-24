@@ -1,41 +1,33 @@
+import hashlib
 import logging
 import os
-import shelve
-import hashlib
-import shutil
-import re
-import time
 import random
-from bs4 import BeautifulSoup
-from lxml import etree, html
-from googlesearch import search
-import googlesearch.user_agents
-import ollama
-import chromadb
-from llama_index.core.node_parser import SemanticSplitterNodeParser
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-from llama_index.core import Document
-import torch
-import portalocker
+import re
+import shelve
+import shutil
+import time
 from urllib.parse import urlparse
+
+import chromadb
+from bs4 import BeautifulSoup
+from googlesearch import search
+from googlesearch import user_agents as google_user_agents
+from huggingface_hub import login
+from lxml import etree, html
+from ollama import generate
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from huggingface_hub import login
+from torch import device as torch_device
 
-# Authenticate to HuggingFace using the token
-hf_token = "?"
-if hf_token:
-    login(token=hf_token)
-else:
-    logging.error("HuggingFace API token is not set.")
-    exit(1)
-
-device = torch.device("cpu")
+from llama_index.core.node_parser import SemanticSplitterNodeParser
+from llama_index.core import Document
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+import portalocker
 
 # Configurable parameters
 CONFIG = {
@@ -61,6 +53,16 @@ CONFIG = {
     "NUM_USER_AGENTS": 10,
     "OUTPUT_DIR": "output"
 }
+
+# Authenticate to HuggingFace using the token
+hf_token = "?"
+if hf_token:
+    login(token=hf_token)
+else:
+    logging.error("HuggingFace API token is not set.")
+    exit(1)
+
+device = torch_device("cpu")
 
 RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
 CLEANED_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'cleaned')
@@ -154,6 +156,8 @@ def save_chunk_content(subquestion, url, chunk, chunk_summary, is_relevant, reas
         f.write(str(metadata))
 
 def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason, source="web", vector_metadata=None):
+    if not summarized_text.strip():
+        return  # Avoid saving empty summaries
     filename_hash = hashlib.md5((subquestion + url).encode('utf-8')).hexdigest()
     cleaned_filename = f"{filename_hash}_cleaned.txt"
     summarized_filename = f"{filename_hash}_summarized.txt"
@@ -182,19 +186,14 @@ def save_to_file(output_dir, filename, content):
         f.write(content)
 
 def save_final_output(main_question, subquestions, contexts, answers):
-    # Create directory structure based on the main question hash
     main_question_hash = hashlib.md5(main_question.encode('utf-8')).hexdigest()
     output_dir = os.path.join(CONFIG["OUTPUT_DIR"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     
-    # Save main question
     save_to_file(output_dir, "main_question.txt", main_question)
-    
-    # Save subquestions
     subquestions_content = "\n".join(subquestions)
     save_to_file(output_dir, "subquestions.txt", subquestions_content)
     
-    # Save combined context and answer
     combined_contexts = "\n\n".join(contexts)
     combined_answers = "\n\n".join(["\n\n".join(ans) for ans in answers])
     
@@ -206,7 +205,7 @@ def generate_response_with_ollama(prompt, model):
         logging.info(f"Using cached response for prompt: {prompt[:100]}...")
         return llm_cache[prompt]
     try:
-        response = ollama.generate(model=model, prompt=prompt)
+        response = generate(model=model, prompt=prompt)
         response_content = response.get('response', "")
         if not response_content:
             logging.error(f"Unexpected response structure: {response}")
@@ -363,37 +362,38 @@ def cleanup_extracted_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text
 
+import json
+
 def evaluate_and_summarize_content(content, query_context, subquestion, model):
     prompt = (
         f"Context: {query_context}\n\n"
         f"Content: {content}\n\n"
         f"Subquestion: {subquestion}\n\n"
         f"Determine if the provided content is relevant to the context for answering the subquestion. "
-        f"Relevance should be based on specific, factual information, and direct connections to the context. "
-        f"Then, if relevant, provide a concise summary of the content focusing on key points and critical insights related to the subquestion. "
-        f"Respond with 'Relevant: [reason]\n\nSummary: [summary]' or 'Not Relevant: [reason]'."
+        f"Relevance should be based on specific, factual information. "
+        f"Then, if relevant, provide a concise summary of the content focusing on key points related to the subquestion. "
+        f"Provide the response in the following JSON format:\n"
+        f"{{\n"
+        f"  \"relevant\": <true/false>,\n"
+        f"  \"reason\": \"<reason for relevance>\",\n"
+        f"  \"summary\": \"<concise summary if relevant>\"\n"
+        f"}}"
     )
     logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
     response = generate_response_with_ollama(prompt, model)
-    
+
     if response:
-        response_lower = response.lower()
-        if response_lower.startswith("relevant:"):
-            is_relevant = True
-            split_response = response.split('\n\nSummary:')
-            reason = split_response[0][response_lower.find(":") + 1:].strip()
-            summary = split_response[1].strip() if len(split_response) > 1 else ""
-        elif response_lower.startswith("not relevant:"):
-            is_relevant = False
-            reason = response[response_lower.find(":") + 1:].strip()
-            summary = ""
-        else:
-            is_relevant = False
-            reason = "Unclear response structure"
-            summary = ""
-        
-        logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
-        return is_relevant, reason, summary
+        try:
+            result = json.loads(response)
+            is_relevant = result.get("relevant", False)
+            reason = result.get("reason", "No reason provided")
+            summary = result.get("summary", "")
+
+            logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
+            return is_relevant, reason, summary
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse JSON response: {e}")
+            return False, "Failed to parse JSON response", ""
     else:
         logging.error("Failed to evaluate and summarize content.")
         return False, "Evaluation failed", ""
@@ -458,7 +458,7 @@ def search_google_with_retries(query, num_results):
                 logging.info(f"Using cached Google search results for query: {query}")
                 return google_cache[query]
             
-            googlesearch.user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
+            google_user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
             results = list(search(query, num_results=num_results))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
@@ -503,7 +503,8 @@ def generate_search_terms(subquestion, model):
         logging.error("Failed to generate search terms.")
         return subquestion
 
-def rephrase_query_to_subquestions(query, model, num_subquestions):
+# Function to rephrase query to initial subquestions
+def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
     prompt = (
         f"Given the following main question: {query}\n\n"
         f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
@@ -511,16 +512,31 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
         f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
         f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. "
         f"Only reply with the subquestions, each on a new line without using a list format."
-    )
-    logging.info(f"Requesting rephrased subquestions for query: {query}")
+    ) 
     response = generate_response_with_ollama(prompt, model)
     if response:
         subquestions = response.split('\n')
         unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
-        logging.info(f"Rephrased subquestions: {unique_subquestions}")
         return unique_subquestions
     else:
-        logging.error("Failed to generate subquestions.")
+        logging.error("Failed to generate initial subquestions.")
+        return []
+
+# Function to rephrase query to follow-up subquestions
+def rephrase_query_to_followup_subquestions(query, model, num_subquestions, context):
+    prompt = (
+        f"Given the following main question: {query}\n\n"
+        f"Current context: {context}\n\n"
+        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. "
+        f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself."
+    )
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        subquestions = response.split('\n')
+        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        return unique_subquestions
+    else:
+        logging.error("Failed to generate follow-up subquestions.")
         return []
 
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
@@ -602,19 +618,18 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     return all_contexts, all_references, subquestion_answers
 
-def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query):
+def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context=""):
     all_contexts = []
     all_references = []
     all_subquestion_answers = []
     main_question_answered = False
 
     while subquestions:
-        logging.info(f"Number of subquestions to process: {len(subquestions)}")
         subquestion = subquestions.pop()
-        context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
+        subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
 
-        if context:
-            all_contexts.extend(context)
+        if subquestion_context:
+            all_contexts.extend(subquestion_context)
             all_references.extend(references)
             all_subquestion_answers.append(subquestion_answers)
 
@@ -622,16 +637,15 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
                 main_question_answered = True
                 break
         else:
-            logging.info(f"Insufficient context, refining subquestion: {subquestion}")
-            refined_subquestions = rephrase_query_to_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"])
-            logging.info(f"Number of refined subquestions generated: {len(refined_subquestions)}")
+            context_str = "\n\n".join(all_contexts)
+            refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"], context_str)
             subquestions.extend(refined_subquestions)
 
     if not main_question_answered or not check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query):
-        logging.info("Main question not fully answered, generating new targeted subquestions.")
-        remaining_subquestions = rephrase_query_to_subquestions(original_query, model, CONFIG["NUM_SUBQUESTIONS"])
+        context_str = "\n\n".join(all_contexts)
+        remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_SUBQUESTIONS"], context_str)
         subquestions.extend(remaining_subquestions)
-        search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query)
+        search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context_str)
     else:
         if all_contexts:
             prompt = (
@@ -640,10 +654,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
                 f"Context:\n{all_contexts}\n\n"
                 f"Subquestions and their answers:\n{all_subquestion_answers}"
             )
-            logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}\nSubquestions and their answers:\n{all_subquestion_answers}")
             response = generate_response_with_ollama(prompt, model)
-            logging.info(f"Output:\n{response}")
-
             save_final_output(original_query, subquestions, all_contexts, [response])
 
 def check_if_main_question_answered(contexts, subquestion_answers, main_question):
@@ -667,7 +678,7 @@ if __name__ == "__main__":
     )
 
     logging.info(f"Starting script with original query: {original_query}")
-    subquestions = rephrase_query_to_subquestions(original_query, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"])
+    subquestions = rephrase_query_to_initial_subquestions(original_query, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"])
     if subquestions:
         search_and_extract(subquestions, CONFIG["MODEL"], CONFIG["NUM_SEARCH_RESULTS_GOOGLE"], CONFIG["NUM_SEARCH_RESULTS_VECTOR"], original_query)
     logging.info("Script completed.")
