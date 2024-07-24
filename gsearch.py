@@ -82,7 +82,7 @@ def clean_directories(*dirs):
             except Exception as e:
                 logging.error(f"Failed to delete {file_path}. Reason: {e}")
 
-clean_directories(RELEVANT_DIR, NOT_RELEVANT_DIR, RAW_CONTENT_DIR)
+clean_directories(RELEVANT_DIR, NOT_RELEVANT_DIR, RAW_CONTENT_DIR, CONFIG["OUTPUT_DIR"])
 
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler()
@@ -194,10 +194,12 @@ def save_final_output(main_question, subquestions, contexts, answers):
     subquestions_content = "\n".join(subquestions)
     save_to_file(output_dir, "subquestions.txt", subquestions_content)
     
-    # Save contexts and answers
-    for i, (context, answer) in enumerate(zip(contexts, answers)):
-        save_to_file(output_dir, f"context_{i+1}.txt", context)
-        save_to_file(output_dir, f"answer_{i+1}.txt", answer)
+    # Save combined context and answer
+    combined_contexts = "\n\n".join(contexts)
+    combined_answers = "\n\n".join(["\n\n".join(ans) for ans in answers])
+    
+    save_to_file(output_dir, "combined_contexts.txt", combined_contexts)
+    save_to_file(output_dir, "combined_answers.txt", combined_answers)
 
 def generate_response_with_ollama(prompt, model):
     if prompt in llm_cache:
@@ -524,17 +526,13 @@ def rephrase_query_to_subquestions(query, model, num_subquestions):
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
     visited_urls = set()
     domain_timestamps = {}
-    all_contexts = ""
+    all_contexts = []
     all_references = []
     urls_to_process = []
     documents_to_process = []
     subquestion_answers = []
 
     logging.info(f"Processing subquestion: {subquestion}")
-
-    # Save subquestion to file
-    subquestion_filename = f"subquestion_{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}.txt"
-    save_to_file(CONFIG["OUTPUT_DIR"], subquestion_filename, subquestion)
 
     search_terms = generate_search_terms(subquestion, model)
     logging.info(f"Translated search terms: {search_terms}")
@@ -571,10 +569,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
             extracted_text, reference = process_url(subquestion, current_url, model)
             if extracted_text:
-                context_filename = f"context_{hashlib.md5((subquestion + current_url).encode('utf-8')).hexdigest()}.txt"
-                save_to_file(CONFIG["OUTPUT_DIR"], context_filename, extracted_text)
-
-                all_contexts += f"Content from {current_url}:\n{extracted_text}\n\n"
+                all_contexts.append(f"Content from {current_url}:\n{extracted_text}")
                 all_references.append(reference)
                 subquestion_answers.append(f"Answer from {current_url}: {extracted_text[:500]}")
                 visited_urls.add(current_url)
@@ -586,10 +581,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
             
-            context_filename = f"context_{hashlib.md5((subquestion + source).encode('utf-8')).hexdigest()}.txt"
-            save_to_file(CONFIG["OUTPUT_DIR"], context_filename, summarized_text)
-
-            all_contexts += f"Content from {source}:\n{summarized_text}\nMetadata: {meta}\n\n"
+            all_contexts.append(f"Content from {source}:\n{summarized_text}")
             all_references.append(source)
             subquestion_answers.append(f"Answer from vector store document: {summarized_text[:500]}")
             save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
@@ -600,15 +592,21 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
     logging.info(f"Answers gathered for subquestion '{subquestion}': {subquestion_answers}")
 
-    subquestion_answer_filename = f"answer_{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}.txt"
-    save_to_file(CONFIG["OUTPUT_DIR"], subquestion_answer_filename, "\n".join(subquestion_answers))
+    # Save subquestion, context, and answer to separate files
+    main_question_hash = hashlib.md5(original_query.encode('utf-8')).hexdigest()
+    output_dir = os.path.join(CONFIG["OUTPUT_DIR"], main_question_hash)
+    os.makedirs(output_dir, exist_ok=True)
+    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_subquestion.txt", subquestion)
+    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(all_contexts))
+    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_answer.txt", "\n\n".join(subquestion_answers))
 
     return all_contexts, all_references, subquestion_answers
 
 def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query):
-    all_contexts = ""
+    all_contexts = []
     all_references = []
     all_subquestion_answers = []
+    main_question_answered = False
 
     while subquestions:
         logging.info(f"Number of subquestions to process: {len(subquestions)}")
@@ -616,28 +614,53 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
         context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
 
         if context:
-            all_contexts += context
+            all_contexts.extend(context)
             all_references.extend(references)
-            all_subquestion_answers.append(f"Subquestion: {subquestion}\n{subquestion_answers}")
+            all_subquestion_answers.append(subquestion_answers)
+
+            if len(all_subquestion_answers) >= CONFIG["NUM_SUBQUESTIONS"]:
+                main_question_answered = True
+                break
         else:
             logging.info(f"Insufficient context, refining subquestion: {subquestion}")
             refined_subquestions = rephrase_query_to_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"])
             logging.info(f"Number of refined subquestions generated: {len(refined_subquestions)}")
             subquestions.extend(refined_subquestions)
 
-    if all_contexts:
-        prompt = (
-            f"Given the following context, answer the question: {original_query}\n\n"
-            f"Context provided contains both factual data and opinions. Use the context to formulate a comprehensive answer to the main question.\n\n"
-            f"Context:\n{all_contexts}\n\n"
-            f"Subquestions and their answers:\n{all_subquestion_answers}"
-        )
-        logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}\nSubquestions and their answers:\n{all_subquestion_answers}")
-        response = generate_response_with_ollama(prompt, model)
-        logging.info(f"Output:\n{response}")
+    if not main_question_answered or not check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query):
+        logging.info("Main question not fully answered, generating new targeted subquestions.")
+        remaining_subquestions = rephrase_query_to_subquestions(original_query, model, CONFIG["NUM_SUBQUESTIONS"])
+        subquestions.extend(remaining_subquestions)
+        search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query)
+    else:
+        if all_contexts:
+            prompt = (
+                f"Given the following context, answer the question: {original_query}\n\n"
+                f"Context provided contains both factual data and opinions. Use the context to formulate a comprehensive answer to the main question.\n\n"
+                f"Context:\n{all_contexts}\n\n"
+                f"Subquestions and their answers:\n{all_subquestion_answers}"
+            )
+            logging.info(f"Requesting final answer for: Input:\n{original_query}\n\nContext:\n{all_contexts}\nSubquestions and their answers:\n{all_subquestion_answers}")
+            response = generate_response_with_ollama(prompt, model)
+            logging.info(f"Output:\n{response}")
 
-        save_final_output(original_query, subquestions, all_contexts, response)
-        
+            save_final_output(original_query, subquestions, all_contexts, [response])
+
+def check_if_main_question_answered(contexts, subquestion_answers, main_question):
+    combined_contexts = "\n\n".join(contexts)
+    combined_subquestion_answers = "\n\n".join([ans for sq in subquestion_answers for ans in sq])
+    prompt = (
+        f"Given the following context and answers to subquestions, determine if the main question has been fully answered:\n\n"
+        f"Main question: {main_question}\n\n"
+        f"Context:\n{combined_contexts}\n\n"
+        f"Subquestions and their answers:\n{combined_subquestion_answers}\n\n"
+        f"Respond with 'Yes' if the main question has been fully answered or 'No' if additional information is still required."
+    )
+    logging.info(f"Checking if main question is answered. Main question: {main_question}")
+    response = generate_response_with_ollama(prompt, CONFIG["MODEL"])
+    logging.info(f"Check response: {response.strip()}")
+    return response.strip().lower() == "yes"
+
 if __name__ == "__main__":
     original_query = (
         "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
