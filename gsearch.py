@@ -32,29 +32,47 @@ import json
 
 # Configurable parameters
 CONFIG = {
-    "MODEL": "gemma2:27b-instruct-q8_0",
-    "NUM_SUBQUESTIONS": 5,
-    "NUM_ADD_SUBQUESTIONS": 3,
-    "NUM_SEARCH_RESULTS_GOOGLE": 5,
-    "NUM_SEARCH_RESULTS_VECTOR": 5,
-    "LOG_FILE": 'logs/app.log',
-    "LLM_CACHE_FILE": 'cache/llm_cache.db',
-    "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
-    "URL_CACHE_FILE": 'cache/url_cache.db',
-    "CHUNK_CACHE_FILE": 'cache/chunk_cache.db',
-    "EXTRACTED_CONTENT_DIR": 'extracted_content',
-    "REQUEST_DELAY": 5,
-    "INITIAL_RETRY_DELAY": 60,
-    "MAX_RETRIES": 3,
-    "MAX_REDIRECTS": 3,
-    "VECTOR_STORE_PATH": "./vector_store",
-    "VECTOR_STORE_COLLECTION": "documents",
-    "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
-    "TEXT_SNIPPET_LENGTH": 200,
-    "MAX_DOCUMENT_LENGTH": 8000,
-    "CONTEXT_LENGTH_TOKENS": 8000,
-    "NUM_USER_AGENTS": 10,
-    "OUTPUT_DIR": "output"
+    # Model configuration
+    "MODEL_NAME": "gemma2:27b-instruct-q8_0",  # Name of the model used for generating responses
+    "NUM_INITIAL_SUBQUESTIONS": 5,  # Number of initial subquestions to generate
+    "NUM_FOLLOWUP_SUBQUESTIONS": 3,  # Number of follow-up subquestions to generate when more information is needed
+    "NUM_SEARCH_RESULTS_GOOGLE": 5,  # Number of search results to fetch from Google for each subquestion
+    "NUM_SEARCH_RESULTS_VECTOR": 5,  # Number of search results to fetch from the vector store for each subquestion
+    "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",  # Embedding model name used for vector store queries
+
+    # Logging configuration
+    "LOG_FILE_PATH": 'logs/app.log',  # Path to the log file
+
+    # Cache configuration
+    "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',  # File path for the LLM response cache
+    "GOOGLE_CACHE_FILE_PATH": 'cache/google_cache.db',  # File path for the Google search results cache
+    "URL_CACHE_FILE_PATH": 'cache/url_cache.db',  # File path for the URL content cache
+    "CHUNK_CACHE_FILE_PATH": 'cache/chunk_cache.db',  # File path for the chunk content cache
+
+    # Content extraction and processing configuration
+    "EXTRACTED_CONTENT_DIRECTORY": 'extracted_content',  # Directory to store extracted content
+    "RAW_CONTENT_DIRECTORY": 'extracted_content/raw',  # Directory to store raw extracted content
+    "CLEANED_CONTENT_DIRECTORY": 'extracted_content/cleaned',  # Directory to store cleaned content
+    "RELEVANT_CONTENT_DIRECTORY": 'extracted_content/cleaned/relevant',  # Directory to store relevant cleaned content
+    "NOT_RELEVANT_CONTENT_DIRECTORY": 'extracted_content/cleaned/not_relevant',  # Directory to store not relevant cleaned content
+
+    # Request and retry configuration
+    "REQUEST_DELAY_SECONDS": 5,  # Delay between requests to avoid rate limiting
+    "INITIAL_RETRY_DELAY_SECONDS": 60,  # Initial delay before retrying a failed request
+    "MAX_RETRIES": 3,  # Maximum number of retries for failed requests
+    "MAX_REDIRECTS": 3,  # Maximum number of redirects to follow
+
+    # Vector store configuration
+    "VECTOR_STORE_DIRECTORY": "./vector_store",  # Directory path for the vector store
+    "VECTOR_STORE_COLLECTION_NAME": "documents",  # Collection name in the vector store
+
+    # Text processing configuration
+    "TEXT_SNIPPET_LENGTH": 1000,  # Length of text snippets for chunking
+    "CONTEXT_LENGTH_TOKENS": 8000,  # Length of context in tokens for generating responses
+
+    # User agent configuration
+    "NUM_USER_AGENTS": 10,  # Number of user agents to generate
+    "OUTPUT_DIRECTORY": "output"  # Directory to store final output
 }
 
 # Authenticate to HuggingFace using the token
@@ -67,12 +85,14 @@ else:
 
 device = torch_device("cpu")
 
-RAW_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'raw')
-CLEANED_CONTENT_DIR = os.path.join(CONFIG["EXTRACTED_CONTENT_DIR"], 'cleaned')
-RELEVANT_DIR = os.path.join(CLEANED_CONTENT_DIR, 'relevant')
-NOT_RELEVANT_DIR = os.path.join(CLEANED_CONTENT_DIR, 'not_relevant')
-
-for directory in [os.path.dirname(CONFIG["LOG_FILE"]), os.path.dirname(CONFIG["LLM_CACHE_FILE"]), RAW_CONTENT_DIR, RELEVANT_DIR, NOT_RELEVANT_DIR, CONFIG["OUTPUT_DIR"]]:
+for directory in [
+    os.path.dirname(CONFIG["LOG_FILE_PATH"]),
+    os.path.dirname(CONFIG["LLM_CACHE_FILE_PATH"]),
+    CONFIG["RAW_CONTENT_DIRECTORY"],
+    CONFIG["RELEVANT_CONTENT_DIRECTORY"],
+    CONFIG["NOT_RELEVANT_CONTENT_DIRECTORY"],
+    CONFIG["OUTPUT_DIRECTORY"]
+]:
     os.makedirs(directory, exist_ok=True)
 
 def clean_directories(*dirs):
@@ -87,12 +107,12 @@ def clean_directories(*dirs):
             except Exception as e:
                 logging.error(f"Failed to delete {file_path}. Reason: {e}")
 
-clean_directories(RELEVANT_DIR, NOT_RELEVANT_DIR, RAW_CONTENT_DIR, CONFIG["OUTPUT_DIR"])
+clean_directories(CONFIG["RELEVANT_CONTENT_DIRECTORY"], CONFIG["NOT_RELEVANT_CONTENT_DIRECTORY"], CONFIG["RAW_CONTENT_DIRECTORY"], CONFIG["OUTPUT_DIRECTORY"])
 
 log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
-file_handler = logging.FileHandler(CONFIG["LOG_FILE"], mode='w')
+file_handler = logging.FileHandler(CONFIG["LOG_FILE_PATH"], mode='w')
 file_handler.setFormatter(log_formatter)
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
@@ -106,10 +126,10 @@ def open_cache(cache_file):
         logging.error(f"Failed to open cache file: {e}")
         return None
 
-llm_cache = open_cache(CONFIG["LLM_CACHE_FILE"])
-google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE"])
-url_cache = open_cache(CONFIG["URL_CACHE_FILE"])
-chunk_cache = open_cache(CONFIG["CHUNK_CACHE_FILE"])
+llm_cache = open_cache(CONFIG["LLM_CACHE_FILE_PATH"])
+google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE_PATH"])
+url_cache = open_cache(CONFIG["URL_CACHE_FILE_PATH"])
+chunk_cache = open_cache(CONFIG["CHUNK_CACHE_FILE_PATH"])
 
 def save_cache(cache, cache_file):
     try:
@@ -124,10 +144,10 @@ def save_raw_content(subquestion, url, raw_content, content_type):
     metadata_filename = f"{filename_hash}_raw_meta.txt"
 
     mode = 'wb' if content_type == 'pdf' else 'w'
-    with open(os.path.join(RAW_CONTENT_DIR, raw_filename), mode) as f:
+    with open(os.path.join(CONFIG["RAW_CONTENT_DIRECTORY"], raw_filename), mode) as f:
         f.write(raw_content)
 
-    with open(os.path.join(RAW_CONTENT_DIR, metadata_filename), 'w', encoding='utf-8') as f:
+    with open(os.path.join(CONFIG["RAW_CONTENT_DIRECTORY"], metadata_filename), 'w', encoding='utf-8') as f:
         metadata = {
             'url': url,
             'subquestion': subquestion,
@@ -142,8 +162,8 @@ def save_chunk_content(subquestion, url, chunk, chunk_summary, is_relevant, reas
     chunk_summary_filename = f"{filename_hash}_chunk_{chunk_id}_summary.txt"
     metadata_filename = f"{filename_hash}_chunk_{chunk_id}_meta.txt"
 
-    directory = RELEVANT_DIR if is_relevant else NOT_RELEVANT_DIR
-    with open(os.path.join(RAW_CONTENT_DIR, chunk_filename), 'w', encoding='utf-8') as f:
+    directory = CONFIG["RELEVANT_CONTENT_DIRECTORY"] if is_relevant else CONFIG["NOT_RELEVANT_CONTENT_DIRECTORY"]
+    with open(os.path.join(CONFIG["RAW_CONTENT_DIRECTORY"], chunk_filename), 'w', encoding='utf-8') as f:
         f.write(chunk)
     
     with open(os.path.join(directory, chunk_summary_filename), 'w', encoding='utf-8') as f:
@@ -167,7 +187,7 @@ def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_rel
     summarized_filename = f"{filename_hash}_summarized.txt"
     metadata_filename = f"{filename_hash}_cleaned_meta.txt"
 
-    directory = RELEVANT_DIR if is_relevant else NOT_RELEVANT_DIR
+    directory = CONFIG["RELEVANT_CONTENT_DIRECTORY"] if is_relevant else CONFIG["NOT_RELEVANT_CONTENT_DIRECTORY"]
     with open(os.path.join(directory, cleaned_filename), 'w', encoding='utf-8') as f:
         f.write(cleaned_text)
     
@@ -191,7 +211,7 @@ def save_to_file(output_dir, filename, content):
 
 def save_final_output(main_question, subquestions, contexts, answers):
     main_question_hash = hashlib.md5(main_question.encode('utf-8')).hexdigest()
-    output_dir = os.path.join(CONFIG["OUTPUT_DIR"], main_question_hash)
+    output_dir = os.path.join(CONFIG["OUTPUT_DIRECTORY"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     
     save_to_file(output_dir, "main_question.txt", main_question)
@@ -217,7 +237,7 @@ def generate_response_with_ollama(prompt, model):
             return ""
 
         llm_cache[prompt] = response_content
-        save_cache(llm_cache, CONFIG["LLM_CACHE_FILE"])
+        save_cache(llm_cache, CONFIG["LLM_CACHE_FILE_PATH"])
         return response_content
     except Exception as e:
         logging.error(f"Failed to generate response with Ollama: {e}")
@@ -263,13 +283,13 @@ class UserAgentManager:
         if self.user_agents:
             user_agent = self.user_agents[self.current_index]
             self.current_index += 1
-            logging.info(f"Returning user agent: {user_agent}")
+            logging.debug(f"Returning user agent: {user_agent}")
             return user_agent
         else:
             logging.error("Failed to get a new user agent. User agent list is empty after regeneration.")
             return None
 
-user_agent_manager = UserAgentManager(CONFIG["MODEL"], CONFIG["NUM_USER_AGENTS"])
+user_agent_manager = UserAgentManager(CONFIG["MODEL_NAME"], CONFIG["NUM_USER_AGENTS"])
 
 def init_browser():
     options = Options()
@@ -304,7 +324,7 @@ def fetch_content_with_browser(url):
     try:
         logging.info(f"Navigating to URL: {url}")
         browser.get(url)
-        WebDriverWait(browser, CONFIG["REQUEST_DELAY"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        WebDriverWait(browser, CONFIG["REQUEST_DELAY_SECONDS"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         logging.info("Page loaded successfully")
 
         try:
@@ -328,7 +348,7 @@ def fetch_content_with_browser(url):
         except Exception as e:
             logging.debug(f"No cookie pop-up found or could not locate buttons")
 
-        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
+        time.sleep(random.uniform(CONFIG["REQUEST_DELAY_SECONDS"], CONFIG["REQUEST_DELAY_SECONDS"] + 2))
         page_source = browser.page_source
         logging.info("Fetched page source successfully")
         return page_source, 'html'
@@ -396,11 +416,11 @@ def search_google_with_retries(query, num_results):
             google_user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
             results = list(search(query, num_results=num_results))
             google_cache[query] = results
-            save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
+            save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             return results
         except Exception as e:
             if e.response.status_code == 429:
-                retry_after = CONFIG["INITIAL_RETRY_DELAY"] * (2 ** attempt)
+                retry_after = CONFIG["INITIAL_RETRY_DELAY_SECONDS"] * (2 ** attempt)
                 logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
                 time.sleep(retry_after)
             else:
@@ -410,7 +430,7 @@ def search_google_with_retries(query, num_results):
     return []
 
 def query_vector_store(collection, query, top_k=5):
-    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
+    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
     embedding = embed_model.get_text_embedding(query)
     try:
         results = collection.query(query_embeddings=[embedding], n_results=top_k, include=["documents", "metadatas"])
@@ -526,7 +546,7 @@ def split_and_process_chunks(subquestion, url, text, model):
         logging.info(f"Using cached chunks for content hash: {content_hash}")
         return chunk_cache[content_hash]
 
-    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
+    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
     splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
     
     document = Document(text=text)
@@ -549,7 +569,7 @@ def split_and_process_chunks(subquestion, url, text, model):
 
     # Save chunks to cache
     chunk_cache[content_hash] = (summarized_text, is_relevant, reason)
-    save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE"])
+    save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE_PATH"])
 
     return summarized_text, is_relevant, reason
 
@@ -561,7 +581,7 @@ def process_url(subquestion, url, model):
     else:
         content, content_type = fetch_content_with_browser(url)
         url_cache[url] = (content, content_type)
-        save_cache(url_cache, CONFIG["URL_CACHE_FILE"])
+        save_cache(url_cache, CONFIG["URL_CACHE_FILE_PATH"])
     
     if content:
         save_raw_content(subquestion, url, content, content_type)
@@ -600,16 +620,16 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     if results:
         urls_to_process.extend(results)
 
-    if os.path.exists(CONFIG["VECTOR_STORE_PATH"]):
-        vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_PATH"])
-        collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION"])
+    if os.path.exists(CONFIG["VECTOR_STORE_DIRECTORY"]):
+        vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_DIRECTORY"])
+        collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION_NAME"])
         vector_results = query_vector_store(collection, subquestion, top_k=num_search_results_vector)
 
         sources_processed = set()
         combined_documents = {}
 
         for doc, meta in zip(vector_results['documents'], vector_results['metadatas']):
-            logging.info(f"Processing doc: {doc[:200]} with meta: {meta}")
+            logging.debug(f"Processing doc: {doc[:200]} with meta: {meta}")
             for m, d in zip(meta, doc):  # Iterating through each meta-doc pair if they are lists
                 source = m.get('source', '')
                 if source not in combined_documents:
@@ -617,11 +637,11 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 combined_documents[source].append((m, d))
 
         for source, docs in combined_documents.items():
-            logging.info(f"Combining documents for source: {source}")
+            logging.debug(f"Combining documents for source: {source}")
             combined_docs_sorted = sorted(docs, key=lambda x: x[0].get('chunk_id', 0))  # Sort by chunk_id if available
             combined_doc = " ".join([d[1] for d in combined_docs_sorted])
             meta = combined_docs_sorted[0][0]
-            logging.info(f"Combined doc: {combined_doc[:200]} with meta: {meta}")
+            logging.debug(f"Combined doc: {combined_doc[:200]} with meta: {meta}")
             documents_to_process.append((combined_doc, meta))
 
     logging.info(f"Initial items to process: URLs = {len(urls_to_process)}, Documents = {len(documents_to_process)}")
@@ -635,8 +655,8 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             if current_url in visited_urls:
                 continue
 
-            if domain in domain_timestamps and current_time - domain_timestamps[domain] < CONFIG["REQUEST_DELAY"]:
-                wait_time = CONFIG["REQUEST_DELAY"] - (current_time - domain_timestamps[domain])
+            if domain in domain_timestamps and current_time - domain_timestamps[domain] < CONFIG["REQUEST_DELAY_SECONDS"]:
+                wait_time = CONFIG["REQUEST_DELAY_SECONDS"] - (current_time - domain_timestamps[domain])
                 logging.info(f"Waiting for {wait_time} seconds before making another request to {domain}")
                 time.sleep(wait_time)
                 current_time = time.time()
@@ -661,7 +681,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
             logging.info(f"Document from vector store: {doc[:200]}")
 
-        time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
+        time.sleep(random.uniform(CONFIG["REQUEST_DELAY_SECONDS"], CONFIG["REQUEST_DELAY_SECONDS"] + 2))
 
     if relevant_answers:
         prompt = (
@@ -677,7 +697,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     logging.info(f"Answer gathered for subquestion '{subquestion}': {all_subquestion_answers}")
 
     main_question_hash = hashlib.md5(original_query.encode('utf-8')).hexdigest()
-    output_dir = os.path.join(CONFIG["OUTPUT_DIR"], main_question_hash)
+    output_dir = os.path.join(CONFIG["OUTPUT_DIRECTORY"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_subquestion.txt", subquestion)
     save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(all_contexts))
@@ -691,6 +711,9 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
     all_subquestion_answers = []
     main_question_answered = False
 
+    # New list to keep track of all subquestions used
+    all_subquestions_used = subquestions[:]
+
     while subquestions:
         subquestion = subquestions.pop()
         subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
@@ -700,18 +723,20 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             all_references.extend(references)
             all_subquestion_answers.extend(subquestion_answers)
 
-            if len(all_subquestion_answers) >= CONFIG["NUM_SUBQUESTIONS"]:
-                main_question_answered = True
+            main_question_answered = check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query, subquestions)
+            if main_question_answered:
                 break
         else:
             context_str = "\n\n".join(all_contexts)
-            refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"], context_str)
+            refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
             subquestions.extend(refined_subquestions)
+            all_subquestions_used.extend(refined_subquestions)  # Add newly generated subquestions
 
     if not main_question_answered:
         context_str = "\n\n".join(all_contexts)
-        remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_SUBQUESTIONS"], context_str)
+        remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
         subquestions.extend(remaining_subquestions)
+        all_subquestions_used.extend(remaining_subquestions)  # Add newly generated subquestions
         search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context_str)
     else:
         if all_contexts:
@@ -723,7 +748,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
                 f"Ensure your answer is exhaustive, drawing upon all relevant details from the context and the subquestion answers. Provide a clear and well-structured response that fully addresses the main question."
             )
             response = generate_response_with_ollama(prompt, model)
-            save_final_output(original_query, subquestions, all_contexts, [response])
+            save_final_output(original_query, all_subquestions_used, all_contexts, [response])  # Use the updated list
 
 def check_if_main_question_answered(contexts, subquestion_answers, main_question, subquestions):
     combined_contexts = "\n\n".join(contexts)
@@ -740,8 +765,8 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
         f"{json_format}"
     )
     logging.info(f"Checking if main question is answered. Main question: {main_question}")
-    response = generate_response_with_ollama(prompt, CONFIG["MODEL"])
-    result = parse_json_response(response, json_format, prompt, CONFIG["MODEL"])
+    response = generate_response_with_ollama(prompt, CONFIG["MODEL_NAME"])
+    result = parse_json_response(response, json_format, prompt, CONFIG["MODEL_NAME"])
     if result:
         answered = result.get("answered", False)
         reason = result.get("reason", "")
@@ -752,7 +777,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
         else:
             logging.info(f"Reason: {reason}")
             logging.info(f"Additional information needed: {additional_information_needed}")
-            refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL"], CONFIG["NUM_ADD_SUBQUESTIONS"], additional_information_needed)
+            refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL_NAME"], CONFIG["NUM_FOLLOWUP_SUBQUESTIONS"], additional_information_needed)
             subquestions.extend(refined_subquestions)
             return False
     return False
@@ -763,9 +788,9 @@ if __name__ == "__main__":
     )
 
     logging.info(f"Starting script with original query: {original_query}")
-    subquestions = rephrase_query_to_initial_subquestions(original_query, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"])
+    subquestions = rephrase_query_to_initial_subquestions(original_query, CONFIG["MODEL_NAME"], CONFIG["NUM_INITIAL_SUBQUESTIONS"])
     if subquestions:
-        search_and_extract(subquestions, CONFIG["MODEL"], CONFIG["NUM_SEARCH_RESULTS_GOOGLE"], CONFIG["NUM_SEARCH_RESULTS_VECTOR"], original_query)
+        search_and_extract(subquestions, CONFIG["MODEL_NAME"], CONFIG["NUM_SEARCH_RESULTS_GOOGLE"], CONFIG["NUM_SEARCH_RESULTS_VECTOR"], original_query)
     logging.info("Script completed.")
     if llm_cache:
         llm_cache.close()
