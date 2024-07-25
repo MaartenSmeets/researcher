@@ -367,7 +367,134 @@ def cleanup_extracted_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text
 
+def generate_search_terms(subquestion, model):
+    prompt = (
+        f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
+        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
+        f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
+        f"Only use the provided subquestion to generate search terms and do not use any other knowledge."
+        f"Subquestion: {subquestion}"
+    )
+
+    logging.info(f"Generating search terms for subquestion: {subquestion}")
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        search_terms = response.strip()
+        logging.info(f"Generated search terms: {search_terms}")
+        return search_terms
+    else:
+        logging.error("Failed to generate search terms.")
+        return subquestion
+
+def search_google_with_retries(query, num_results):
+    for attempt in range(CONFIG["MAX_RETRIES"]):
+        try:
+            if query in google_cache:
+                logging.info(f"Using cached Google search results for query: {query}")
+                return google_cache[query]
+            
+            google_user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
+            results = list(search(query, num_results=num_results))
+            google_cache[query] = results
+            save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
+            return results
+        except Exception as e:
+            if e.response.status_code == 429:
+                retry_after = CONFIG["INITIAL_RETRY_DELAY"] * (2 ** attempt)
+                logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
+                time.sleep(retry_after)
+            else:
+                logging.error(f"Failed to search for query '{query}': {e}")
+                return []
+    logging.error(f"Exhausted retries for query: {query}")
+    return []
+
+def query_vector_store(collection, query, top_k=5):
+    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
+    embedding = embed_model.get_text_embedding(query)
+    try:
+        results = collection.query(query_embeddings=[embedding], n_results=top_k, include=["documents", "metadatas"])
+        logging.info(f"Found {len(results['documents'])} documents in vector store for query: {query}")
+        return results
+    except Exception as e:
+        logging.error(f"Failed to query vector store: {e}")
+        return []
+
+def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
+    prompt = (
+        f"Given the following main question: {query}\n\n"
+        f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
+        f"Ensure the subquestions collectively address all aspects of the main question. "
+        f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
+        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. Only use the provided main question to generate subquestions and do not use any other knowledge."
+        f"Only reply with the subquestions, each on a new line without using a list format."
+    ) 
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        subquestions = response.split('\n')
+        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        return unique_subquestions
+    else:
+        logging.error("Failed to generate initial subquestions.")
+        return []
+
+def rephrase_query_to_followup_subquestions(query, model, num_subquestions, context):
+    prompt = (
+        f"Given the following main question: {query}\n\n"
+        f"Current context: {context}\n\n"
+        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. "
+        f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
+    )
+    response = generate_response_with_ollama(prompt, model)
+    if response:
+        subquestions = response.split('\n')
+        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        return subquestions
+    else:
+        logging.error("Failed to generate follow-up subquestions.")
+        return []
+
+def parse_json_response(response, json_format, prompt, model, max_retries=3):
+    error_history = set()
+    for attempt in range(max_retries):
+        try:
+            response = response.strip('```json').strip('```').strip()
+            result = json.loads(response)
+            return result
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
+            error_message = str(e)
+            if error_message in error_history:
+                response = request_llm_to_fix_json_creatively(response, error_message, json_format, prompt, model)
+            else:
+                response = request_llm_to_fix_json(response, error_message, json_format, prompt, model)
+            error_history.add(error_message)
+    return None
+
+def request_llm_to_fix_json(response, error, json_format, prompt, model):
+    prompt = (
+        f"The following JSON response contains errors:\n\n"
+        f"{response}\n\n"
+        f"Error details: {error}\n\n"
+        f"Please correct the JSON response to match the expected format provided below. Ensure the corrected JSON can be parsed successfully.\n\n"
+        f"Expected JSON format: {json_format}"
+    )
+    return generate_response_with_ollama(prompt, model)
+
+def request_llm_to_fix_json_creatively(response, error, json_format, prompt, model):
+    prompt = (
+        f"The following JSON response contains errors and previous attempts to fix it have failed:\n\n"
+        f"{response}\n\n"
+        f"Error details: {error}\n\n"
+        f"Please correct the JSON response creatively to match the expected format provided below. Ensure the corrected JSON can be parsed successfully and consider different approaches.\n\n"
+        f"Expected JSON format: {json_format}"
+    )
+    return generate_response_with_ollama(prompt, model)
+
 def evaluate_and_summarize_content(content, query_context, subquestion, model):
+    json_format = (
+        '{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<very detailed summary if relevant>"\n}'
+    )
     prompt = (
         f"Context: {query_context}\n\n"
         f"Content: {content}\n\n"
@@ -376,27 +503,21 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         f"Relevance should be based on specific, factual information. Only use the provided context to determine relevance. Do not use any other knowledge. "
         f"Then, if relevant, provide a very detailed summary of the content, focusing on key points related to the subquestion. Ensure the summary includes specific details and mentions all relevant information without general statements like 'the content describes [interesting stuff]'. "
         f"Provide the response in the following plain JSON format without any Markdown formatting:\n"
-        f'{{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<very detailed summary if relevant>"\n}}'
+        f"{json_format}"
     )
     logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
     response = generate_response_with_ollama(prompt, model)
 
-    if response:
-        logging.debug(f"Model response: {response}")
-        response = response.strip('```json').strip('```').strip()
-        try:
-            result = json.loads(response)
-            is_relevant = result.get("relevant", False)
-            reason = result.get("reason", "No reason provided")
-            summary = result.get("summary", "") or ""
-            logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
-            return is_relevant, reason, summary
-        except json.JSONDecodeError as e:
-            logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
-            return False, "Failed to parse JSON response", ""
+    result = parse_json_response(response, json_format, prompt, model)
+    if result:
+        is_relevant = result.get("relevant", False)
+        reason = result.get("reason", "No reason provided")
+        summary = result.get("summary", "") or ""
+        logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
+        return is_relevant, reason, summary
     else:
-        logging.error("Failed to evaluate and summarize content.")
-        return False, "Evaluation failed", ""
+        logging.error(f"Failed to evaluate and summarize content for subquestion: {subquestion[:200]}")
+        return False, "Failed to parse JSON response", ""
 
 def split_and_process_chunks(subquestion, url, text, model):
     # Check if the chunks for this file have already been processed
@@ -460,95 +581,6 @@ def process_url(subquestion, url, model):
         else:
             save_cleaned_content(subquestion, url, "", "", False, "Failed to extract cleaned text")
     return "", ""
-
-def search_google_with_retries(query, num_results):
-    for attempt in range(CONFIG["MAX_RETRIES"]):
-        try:
-            if query in google_cache:
-                logging.info(f"Using cached Google search results for query: {query}")
-                return google_cache[query]
-            
-            google_user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
-            results = list(search(query, num_results=num_results))
-            google_cache[query] = results
-            save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE"])
-            return results
-        except Exception as e:
-            if e.response.status_code == 429:
-                retry_after = CONFIG["INITIAL_RETRY_DELAY"] * (2 ** attempt)
-                logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
-                time.sleep(retry_after)
-            else:
-                logging.error(f"Failed to search for query '{query}': {e}")
-                return []
-    logging.error(f"Exhausted retries for query: {query}")
-    return []
-
-def query_vector_store(collection, query, top_k=5):
-    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
-    embedding = embed_model.get_text_embedding(query)
-    try:
-        results = collection.query(query_embeddings=[embedding], n_results=top_k, include=["documents", "metadatas"])
-        logging.info(f"Found {len(results['documents'])} documents in vector store for query: {query}")
-        return results
-    except Exception as e:
-        logging.error(f"Failed to query vector store: {e}")
-        return []
-
-def generate_search_terms(subquestion, model):
-    prompt = (
-        f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
-        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
-        f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
-        f"Only use the provided subquestion to generate search terms and do not use any other knowledge."
-        f"Subquestion: {subquestion}"
-    )
-
-    logging.info(f"Generating search terms for subquestion: {subquestion}")
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        search_terms = response.strip()
-        logging.info(f"Generated search terms: {search_terms}")
-        return search_terms
-    else:
-        logging.error("Failed to generate search terms.")
-        return subquestion
-
-# Function to rephrase query to initial subquestions
-def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
-    prompt = (
-        f"Given the following main question: {query}\n\n"
-        f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
-        f"Ensure the subquestions collectively address all aspects of the main question. "
-        f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
-        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. Only use the provided main question to generate subquestions and do not use any other knowledge."
-        f"Only reply with the subquestions, each on a new line without using a list format."
-    ) 
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        subquestions = response.split('\n')
-        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
-        return unique_subquestions
-    else:
-        logging.error("Failed to generate initial subquestions.")
-        return []
-
-# Function to rephrase query to follow-up subquestions
-def rephrase_query_to_followup_subquestions(query, model, num_subquestions, context):
-    prompt = (
-        f"Given the following main question: {query}\n\n"
-        f"Current context: {context}\n\n"
-        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. "
-        f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
-    )
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        subquestions = response.split('\n')
-        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
-        return subquestions
-    else:
-        logging.error("Failed to generate follow-up subquestions.")
-        return []
 
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
     visited_urls = set()
@@ -684,10 +716,11 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
     else:
         if all_contexts:
             prompt = (
-                f"Given the following context, answer the question: {original_query}\n\n"
-                f"Context provided contains both factual data and opinions. Use the context to formulate a comprehensive answer to the main question. Only use the provided context and do not use any other knowledge.\n\n"
+                f"Given the following context, subquestions, and their answers, answer the main question: {original_query}\n\n"
+                f"The provided context encompasses both factual information and a range of opinions. In addition, several subquestions related to the main question have been answered, and these answers should be considered when formulating your response. Your task is to use solely the supplied context, along with the subquestions and their answers, to construct a comprehensive and detailed response to the main question. Refrain from incorporating any external knowledge or information.\n\n"
                 f"Context:\n{all_contexts}\n\n"
-                f"Subquestions and their answers:\n{all_subquestion_answers}"
+                f"Subquestions and their answers:\n{all_subquestion_answers}\n\n"
+                f"Ensure your answer is exhaustive, drawing upon all relevant details from the context and the subquestion answers. Provide a clear and well-structured response that fully addresses the main question."
             )
             response = generate_response_with_ollama(prompt, model)
             save_final_output(original_query, subquestions, all_contexts, [response])
@@ -695,20 +728,21 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
 def check_if_main_question_answered(contexts, subquestion_answers, main_question, subquestions):
     combined_contexts = "\n\n".join(contexts)
     combined_subquestion_answers = "\n\n".join(subquestion_answers)
+    json_format = (
+        '{\n  "answered": true/false,\n  "reason": "<reason if not fully answered>",\n  "additional_information_needed": "<details of what additional information is needed if any>"\n}'
+    )
     prompt = (
         f"Given the following context and answers to subquestions, determine if the main question has been fully answered:\n\n"
         f"Main question: {main_question}\n\n"
         f"Context:\n{combined_contexts}\n\n"
         f"Subquestions and their answers:\n{combined_subquestion_answers}\n\n"
         f"Respond with a JSON object containing the following keys:\n"
-        f'{{\n  "answered": true/false,\n  "reason": "<reason if not fully answered>",\n  "additional_information_needed": "<details of what additional information is needed if any>"\n}}'
+        f"{json_format}"
     )
     logging.info(f"Checking if main question is answered. Main question: {main_question}")
     response = generate_response_with_ollama(prompt, CONFIG["MODEL"])
-    logging.info(f"Check response: {response.strip()}")
-    response = response.strip('```json').strip('```').strip()
-    try:
-        result = json.loads(response)
+    result = parse_json_response(response, json_format, prompt, CONFIG["MODEL"])
+    if result:
         answered = result.get("answered", False)
         reason = result.get("reason", "")
         additional_information_needed = result.get("additional_information_needed", "")
@@ -721,9 +755,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
             refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL"], CONFIG["NUM_ADD_SUBQUESTIONS"], additional_information_needed)
             subquestions.extend(refined_subquestions)
             return False
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
-        return False
+    return False
 
 if __name__ == "__main__":
     original_query = (
