@@ -47,7 +47,6 @@ CONFIG = {
     "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',  # File path for the LLM response cache
     "GOOGLE_CACHE_FILE_PATH": 'cache/google_cache.db',  # File path for the Google search results cache
     "URL_CACHE_FILE_PATH": 'cache/url_cache.db',  # File path for the URL content cache
-    "CHUNK_CACHE_FILE_PATH": 'cache/chunk_cache.db',  # File path for the chunk content cache
 
     # Content extraction and processing configuration
     "EXTRACTED_CONTENT_DIRECTORY": 'extracted_content',  # Directory to store extracted content
@@ -129,7 +128,6 @@ def open_cache(cache_file):
 llm_cache = open_cache(CONFIG["LLM_CACHE_FILE_PATH"])
 google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE_PATH"])
 url_cache = open_cache(CONFIG["URL_CACHE_FILE_PATH"])
-chunk_cache = open_cache(CONFIG["CHUNK_CACHE_FILE_PATH"])
 
 def save_cache(cache, cache_file):
     try:
@@ -389,7 +387,7 @@ def cleanup_extracted_text(text):
 
 def generate_search_terms(subquestion, model):
     prompt = (
-        f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
+        f"Transform the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
         f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
         f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
         f"Only use the provided subquestion to generate search terms and do not use any other knowledge."
@@ -464,6 +462,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
         f"Current context: {context}\n\n"
         f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. "
         f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
+        f"Only reply with the subquestions, each on a new line without using a list format."
     )
     response = generate_response_with_ollama(prompt, model)
     if response:
@@ -499,7 +498,8 @@ def request_llm_to_fix_json(response, error, json_format, model):
         f"Please correct the JSON response to match the expected format provided below and reply only with the fixed JSON. Ensure the corrected JSON can be parsed successfully.\n\n"
         f"Expected JSON format: {json_format}"
     )
-    return generate_response_with_ollama(prompt, model)['json']
+    fixed_response = generate_response_with_ollama(prompt, model)
+    return fixed_response
 
 def request_llm_to_fix_json_creatively(response, error, json_format, model):
     prompt = (
@@ -509,7 +509,8 @@ def request_llm_to_fix_json_creatively(response, error, json_format, model):
         f"Please correct the JSON response creatively to match the expected format provided below and reply only with the fixed JSON. Ensure the corrected JSON can be parsed successfully and consider different approaches.\n\n"
         f"Expected JSON format: {json_format}"
     )
-    return generate_response_with_ollama(prompt, model)['json']
+    fixed_response = generate_response_with_ollama(prompt, model)
+    return fixed_response
 
 def evaluate_and_summarize_content(content, query_context, subquestion, model):
     json_format = (
@@ -540,12 +541,6 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         return False, "Failed to parse JSON response", ""
 
 def split_and_process_chunks(subquestion, url, text, model):
-    # Check if the chunks for this file have already been processed
-    content_hash = hashlib.md5((subquestion + url + text).encode('utf-8')).hexdigest()
-    if content_hash in chunk_cache:
-        logging.info(f"Using cached chunks for content hash: {content_hash}")
-        return chunk_cache[content_hash]
-
     embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
     splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
     
@@ -566,10 +561,6 @@ def split_and_process_chunks(subquestion, url, text, model):
     summarized_text = " ".join(chunk_summaries)
     is_relevant = any(chunk_relevance)
     reason = "At least one chunk is relevant" if is_relevant else "None of the chunks are relevant"
-
-    # Save chunks to cache
-    chunk_cache[content_hash] = (summarized_text, is_relevant, reason)
-    save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE_PATH"])
 
     return summarized_text, is_relevant, reason
 
@@ -798,7 +789,5 @@ if __name__ == "__main__":
         google_cache.close()
     if url_cache:
         url_cache.close()
-    if chunk_cache:
-        chunk_cache.close()
     if browser:
         browser.quit()
