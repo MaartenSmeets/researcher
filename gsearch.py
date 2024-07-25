@@ -474,7 +474,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
         logging.error("Failed to generate follow-up subquestions.")
         return []
 
-def parse_json_response(response, json_format, prompt, model, max_retries=3):
+def parse_json_response(response, json_format, model, max_retries=3):
     error_history = set()
     for attempt in range(max_retries):
         try:
@@ -485,31 +485,31 @@ def parse_json_response(response, json_format, prompt, model, max_retries=3):
             logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
             error_message = str(e)
             if error_message in error_history:
-                response = request_llm_to_fix_json_creatively(response, error_message, json_format, prompt, model)
+                response = request_llm_to_fix_json_creatively(response, error_message, json_format, model)
             else:
-                response = request_llm_to_fix_json(response, error_message, json_format, prompt, model)
+                response = request_llm_to_fix_json(response, error_message, json_format, model)
             error_history.add(error_message)
     return None
 
-def request_llm_to_fix_json(response, error, json_format, prompt, model):
+def request_llm_to_fix_json(response, error, json_format, model):
     prompt = (
         f"The following JSON response contains errors:\n\n"
         f"{response}\n\n"
         f"Error details: {error}\n\n"
-        f"Please correct the JSON response to match the expected format provided below. Ensure the corrected JSON can be parsed successfully.\n\n"
+        f"Please correct the JSON response to match the expected format provided below and reply only with the fixed JSON. Ensure the corrected JSON can be parsed successfully.\n\n"
         f"Expected JSON format: {json_format}"
     )
-    return generate_response_with_ollama(prompt, model)
+    return generate_response_with_ollama(prompt, model)['json']
 
-def request_llm_to_fix_json_creatively(response, error, json_format, prompt, model):
+def request_llm_to_fix_json_creatively(response, error, json_format, model):
     prompt = (
         f"The following JSON response contains errors and previous attempts to fix it have failed:\n\n"
         f"{response}\n\n"
         f"Error details: {error}\n\n"
-        f"Please correct the JSON response creatively to match the expected format provided below. Ensure the corrected JSON can be parsed successfully and consider different approaches.\n\n"
+        f"Please correct the JSON response creatively to match the expected format provided below and reply only with the fixed JSON. Ensure the corrected JSON can be parsed successfully and consider different approaches.\n\n"
         f"Expected JSON format: {json_format}"
     )
-    return generate_response_with_ollama(prompt, model)
+    return generate_response_with_ollama(prompt, model)['json']
 
 def evaluate_and_summarize_content(content, query_context, subquestion, model):
     json_format = (
@@ -528,7 +528,7 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
     logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
     response = generate_response_with_ollama(prompt, model)
 
-    result = parse_json_response(response, json_format, prompt, model)
+    result = parse_json_response(response, json_format, model)
     if result:
         is_relevant = result.get("relevant", False)
         reason = result.get("reason", "No reason provided")
@@ -766,7 +766,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
     )
     logging.info(f"Checking if main question is answered. Main question: {main_question}")
     response = generate_response_with_ollama(prompt, CONFIG["MODEL_NAME"])
-    result = parse_json_response(response, json_format, prompt, CONFIG["MODEL_NAME"])
+    result = parse_json_response(response, json_format, CONFIG["MODEL_NAME"])
     if result:
         answered = result.get("answered", False)
         reason = result.get("reason", "")
