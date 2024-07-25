@@ -317,16 +317,16 @@ def fetch_content_with_browser(url):
             for cookie_button in cookie_buttons:
                 try:
                     if WebDriverWait(browser, 5).until(EC.element_to_be_clickable(cookie_button)):
-                        logging.info("Found clickable cookie pop-up button, attempting to click it")
+                        logging.debug("Found clickable cookie pop-up button, attempting to click it")
                         cookie_button.click()
-                        logging.info("Clicked cookie pop-up button, waiting for it to disappear")
+                        logging.debug("Clicked cookie pop-up button, waiting for it to disappear")
                         
                         WebDriverWait(browser, 5).until(EC.invisibility_of_element(cookie_button))
                         logging.info("Cookie pop-up disappeared successfully")
                 except Exception as e:
-                    logging.info(f"Could not click the button")
+                    logging.debug(f"Could not click the button")
         except Exception as e:
-            logging.info(f"No cookie pop-up found or could not locate buttons")
+            logging.debug(f"No cookie pop-up found or could not locate buttons")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
         page_source = browser.page_source
@@ -373,10 +373,10 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         f"Content: {content}\n\n"
         f"Subquestion: {subquestion}\n\n"
         f"Determine if the provided content is relevant to the context for answering the subquestion. "
-        f"Relevance should be based on specific, factual information. Only use the provided context to determine relevance. Do not use any other knowledge."
-        f"Then, if relevant, provide a concise summary of the content focusing on key points related to the subquestion. "
+        f"Relevance should be based on specific, factual information. Only use the provided context to determine relevance. Do not use any other knowledge. "
+        f"Then, if relevant, provide a very detailed summary of the content, focusing on key points related to the subquestion. Ensure the summary includes specific details and mentions all relevant information without general statements like 'the content describes [interesting stuff]'. "
         f"Provide the response in the following plain JSON format without any Markdown formatting:\n"
-        f'{{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise summary if relevant>"\n}}'
+        f'{{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<very detailed summary if relevant>"\n}}'
     )
     logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
     response = generate_response_with_ollama(prompt, model)
