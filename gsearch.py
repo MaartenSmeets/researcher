@@ -28,6 +28,7 @@ from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core import Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import portalocker
+import json
 
 # Configurable parameters
 CONFIG = {
@@ -195,7 +196,7 @@ def save_final_output(main_question, subquestions, contexts, answers):
     save_to_file(output_dir, "subquestions.txt", subquestions_content)
     
     combined_contexts = "\n\n".join(contexts)
-    combined_answers = "\n\n".join(["\n\n".join(ans) for ans in answers])
+    combined_answers = "\n\n".join(answers)
     
     save_to_file(output_dir, "combined_contexts.txt", combined_contexts)
     save_to_file(output_dir, "combined_answers.txt", combined_answers)
@@ -362,8 +363,6 @@ def cleanup_extracted_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text
 
-import json
-
 def evaluate_and_summarize_content(content, query_context, subquestion, model):
     prompt = (
         f"Context: {query_context}\n\n"
@@ -380,14 +379,12 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
 
     if response:
         logging.debug(f"Model response: {response}")
-        # Strip Markdown-like formatting if present
         response = response.strip('```json').strip('```').strip()
         try:
             result = json.loads(response)
             is_relevant = result.get("relevant", False)
             reason = result.get("reason", "No reason provided")
-            summary = result.get("summary", "") or ""  # Ensure summary is a string
-
+            summary = result.get("summary", "") or ""
             logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
             return is_relevant, reason, summary
         except json.JSONDecodeError as e:
@@ -533,7 +530,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
     if response:
         subquestions = response.split('\n')
         unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
-        return unique_subquestions
+        return subquestions
     else:
         logging.error("Failed to generate follow-up subquestions.")
         return []
@@ -545,7 +542,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     all_references = []
     urls_to_process = []
     documents_to_process = []
-    subquestion_answers = []
+    relevant_answers = []
 
     logging.info(f"Processing subquestion: {subquestion}")
 
@@ -560,10 +557,25 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
         vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_PATH"])
         collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION"])
         vector_results = query_vector_store(collection, subquestion, top_k=num_search_results_vector)
-    
-        for docs, metas in zip(vector_results['documents'], vector_results['metadatas']):
-            for doc, meta in zip(docs, metas):
-                documents_to_process.append((doc, meta))
+
+        sources_processed = set()
+        combined_documents = {}
+
+        for doc, meta in zip(vector_results['documents'], vector_results['metadatas']):
+            logging.info(f"Processing doc: {doc[:200]} with meta: {meta}")
+            for m, d in zip(meta, doc):  # Iterating through each meta-doc pair if they are lists
+                source = m.get('source', '')
+                if source not in combined_documents:
+                    combined_documents[source] = []
+                combined_documents[source].append((m, d))
+
+        for source, docs in combined_documents.items():
+            logging.info(f"Combining documents for source: {source}")
+            combined_docs_sorted = sorted(docs, key=lambda x: x[0].get('chunk_id', 0))  # Sort by chunk_id if available
+            combined_doc = " ".join([d[1] for d in combined_docs_sorted])
+            meta = combined_docs_sorted[0][0]
+            logging.info(f"Combined doc: {combined_doc[:200]} with meta: {meta}")
+            documents_to_process.append((combined_doc, meta))
 
     logging.info(f"Initial items to process: URLs = {len(urls_to_process)}, Documents = {len(documents_to_process)}")
 
@@ -572,7 +584,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             current_url = urls_to_process.pop(0)
             domain = urlparse(current_url).netloc
             current_time = time.time()
-            
+
             if current_url in visited_urls:
                 continue
 
@@ -586,36 +598,45 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             if extracted_text:
                 all_contexts.append(f"Content from {current_url}:\n{extracted_text}")
                 all_references.append(reference)
-                subquestion_answers.append(f"Answer from {current_url}: {extracted_text[:500]}")
+                relevant_answers.append(extracted_text)
                 visited_urls.add(current_url)
                 domain_timestamps[domain] = current_time
 
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
-            logging.info(f"Evaluating content relevance for document from vector store with metadata.")
+            logging.info(f"Evaluating content relevance for document from vector store with metadata: {meta}")
             summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
-            
+
             all_contexts.append(f"Content from {source}:\n{summarized_text}")
             all_references.append(source)
-            subquestion_answers.append(f"Answer from vector store document: {summarized_text[:500]}")
+            relevant_answers.append(summarized_text)
             save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
             logging.info(f"Document from vector store: {doc[:200]}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY"], CONFIG["REQUEST_DELAY"] + 2))
 
-    logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
-    logging.info(f"Answers gathered for subquestion '{subquestion}': {subquestion_answers}")
+    if relevant_answers:
+        prompt = (
+            f"Given the following relevant excerpts, provide a single, concise, and detailed answer to the subquestion: {subquestion}\n\n"
+            f"Relevant excerpts:\n" + "\n\n".join(relevant_answers)
+        )
+        final_subquestion_answer = generate_response_with_ollama(prompt, model)
+        all_subquestion_answers = [final_subquestion_answer]
+    else:
+        all_subquestion_answers = ["No relevant information found."]
 
-    # Save subquestion, context, and answer to separate files
+    logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
+    logging.info(f"Answer gathered for subquestion '{subquestion}': {all_subquestion_answers}")
+
     main_question_hash = hashlib.md5(original_query.encode('utf-8')).hexdigest()
     output_dir = os.path.join(CONFIG["OUTPUT_DIR"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_subquestion.txt", subquestion)
     save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(all_contexts))
-    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_answer.txt", "\n\n".join(subquestion_answers))
+    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_answer.txt", "\n\n".join(all_subquestion_answers))
 
-    return all_contexts, all_references, subquestion_answers
+    return all_contexts, all_references, all_subquestion_answers
 
 def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context=""):
     all_contexts = []
@@ -630,7 +651,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
         if subquestion_context:
             all_contexts.extend(subquestion_context)
             all_references.extend(references)
-            all_subquestion_answers.append(subquestion_answers)
+            all_subquestion_answers.extend(subquestion_answers)
 
             if len(all_subquestion_answers) >= CONFIG["NUM_SUBQUESTIONS"]:
                 main_question_answered = True
@@ -640,7 +661,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_SUBQUESTIONS"], context_str)
             subquestions.extend(refined_subquestions)
 
-    if not main_question_answered or not check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query):
+    if not main_question_answered:
         context_str = "\n\n".join(all_contexts)
         remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_SUBQUESTIONS"], context_str)
         subquestions.extend(remaining_subquestions)
@@ -658,18 +679,36 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
 
 def check_if_main_question_answered(contexts, subquestion_answers, main_question):
     combined_contexts = "\n\n".join(contexts)
-    combined_subquestion_answers = "\n\n".join([ans for sq in subquestion_answers for ans in sq])
+    combined_subquestion_answers = "\n\n".join(subquestion_answers)
     prompt = (
         f"Given the following context and answers to subquestions, determine if the main question has been fully answered:\n\n"
         f"Main question: {main_question}\n\n"
         f"Context:\n{combined_contexts}\n\n"
         f"Subquestions and their answers:\n{combined_subquestion_answers}\n\n"
-        f"Respond with 'Yes' if the main question has been fully answered or 'No' if additional information is still required."
+        f"Respond with a JSON object containing the following keys:\n"
+        f'{{\n  "answered": true/false,\n  "reason": "<reason if not fully answered>",\n  "additional_information_needed": "<details of what additional information is needed if any>"\n}}'
     )
     logging.info(f"Checking if main question is answered. Main question: {main_question}")
     response = generate_response_with_ollama(prompt, CONFIG["MODEL"])
     logging.info(f"Check response: {response.strip()}")
-    return response.strip().lower() == "yes"
+    response = response.strip('```json').strip('```').strip()
+    try:
+        result = json.loads(response)
+        answered = result.get("answered", False)
+        reason = result.get("reason", "")
+        additional_information_needed = result.get("additional_information_needed", "")
+
+        if answered:
+            return True
+        else:
+            logging.info(f"Reason: {reason}")
+            logging.info(f"Additional information needed: {additional_information_needed}")
+            refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"], additional_information_needed)
+            subquestions.extend(refined_subquestions)
+            return False
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
+        return False
 
 if __name__ == "__main__":
     original_query = (
