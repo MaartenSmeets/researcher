@@ -34,6 +34,7 @@ import json
 CONFIG = {
     "MODEL": "gemma2:27b-instruct-q8_0",
     "NUM_SUBQUESTIONS": 10,
+    "NUM_ADD_SUBQUESTIONS": 3,
     "NUM_SEARCH_RESULTS_GOOGLE": 10,
     "NUM_SEARCH_RESULTS_VECTOR": 5,
     "LOG_FILE": 'logs/app.log',
@@ -677,7 +678,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             response = generate_response_with_ollama(prompt, model)
             save_final_output(original_query, subquestions, all_contexts, [response])
 
-def check_if_main_question_answered(contexts, subquestion_answers, main_question):
+def check_if_main_question_answered(contexts, subquestion_answers, main_question, subquestions):
     combined_contexts = "\n\n".join(contexts)
     combined_subquestion_answers = "\n\n".join(subquestion_answers)
     prompt = (
@@ -703,7 +704,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
         else:
             logging.info(f"Reason: {reason}")
             logging.info(f"Additional information needed: {additional_information_needed}")
-            refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL"], CONFIG["NUM_SUBQUESTIONS"], additional_information_needed)
+            refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL"], CONFIG["NUM_ADD_SUBQUESTIONS"], additional_information_needed)
             subquestions.extend(refined_subquestions)
             return False
     except json.JSONDecodeError as e:
