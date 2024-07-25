@@ -33,14 +33,15 @@ import json
 # Configurable parameters
 CONFIG = {
     "MODEL": "gemma2:27b-instruct-q8_0",
-    "NUM_SUBQUESTIONS": 10,
+    "NUM_SUBQUESTIONS": 5,
     "NUM_ADD_SUBQUESTIONS": 3,
-    "NUM_SEARCH_RESULTS_GOOGLE": 10,
+    "NUM_SEARCH_RESULTS_GOOGLE": 5,
     "NUM_SEARCH_RESULTS_VECTOR": 5,
     "LOG_FILE": 'logs/app.log',
     "LLM_CACHE_FILE": 'cache/llm_cache.db',
     "GOOGLE_CACHE_FILE": 'cache/google_cache.db',
     "URL_CACHE_FILE": 'cache/url_cache.db',
+    "CHUNK_CACHE_FILE": 'cache/chunk_cache.db',
     "EXTRACTED_CONTENT_DIR": 'extracted_content',
     "REQUEST_DELAY": 5,
     "INITIAL_RETRY_DELAY": 60,
@@ -50,7 +51,7 @@ CONFIG = {
     "VECTOR_STORE_COLLECTION": "documents",
     "EMBEDDING_MODEL": "mixedbread-ai/mxbai-embed-large-v1",
     "TEXT_SNIPPET_LENGTH": 200,
-    "MAX_DOCUMENT_LENGTH": 2000,
+    "MAX_DOCUMENT_LENGTH": 8000,
     "CONTEXT_LENGTH_TOKENS": 8000,
     "NUM_USER_AGENTS": 10,
     "OUTPUT_DIR": "output"
@@ -108,6 +109,7 @@ def open_cache(cache_file):
 llm_cache = open_cache(CONFIG["LLM_CACHE_FILE"])
 google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE"])
 url_cache = open_cache(CONFIG["URL_CACHE_FILE"])
+chunk_cache = open_cache(CONFIG["CHUNK_CACHE_FILE"])
 
 def save_cache(cache, cache_file):
     try:
@@ -201,6 +203,7 @@ def save_final_output(main_question, subquestions, contexts, answers):
     
     save_to_file(output_dir, "combined_contexts.txt", combined_contexts)
     save_to_file(output_dir, "combined_answers.txt", combined_answers)
+    save_to_file(output_dir, "final_answer.txt", answers[-1])  # Save the final answer separately
 
 def generate_response_with_ollama(prompt, model):
     if prompt in llm_cache:
@@ -370,7 +373,7 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         f"Content: {content}\n\n"
         f"Subquestion: {subquestion}\n\n"
         f"Determine if the provided content is relevant to the context for answering the subquestion. "
-        f"Relevance should be based on specific, factual information. "
+        f"Relevance should be based on specific, factual information. Only use the provided context to determine relevance. Do not use any other knowledge."
         f"Then, if relevant, provide a concise summary of the content focusing on key points related to the subquestion. "
         f"Provide the response in the following plain JSON format without any Markdown formatting:\n"
         f'{{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise summary if relevant>"\n}}'
@@ -396,6 +399,12 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         return False, "Evaluation failed", ""
 
 def split_and_process_chunks(subquestion, url, text, model):
+    # Check if the chunks for this file have already been processed
+    content_hash = hashlib.md5((subquestion + url + text).encode('utf-8')).hexdigest()
+    if content_hash in chunk_cache:
+        logging.info(f"Using cached chunks for content hash: {content_hash}")
+        return chunk_cache[content_hash]
+
     embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL"], device=device)
     splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
     
@@ -416,6 +425,10 @@ def split_and_process_chunks(subquestion, url, text, model):
     summarized_text = " ".join(chunk_summaries)
     is_relevant = any(chunk_relevance)
     reason = "At least one chunk is relevant" if is_relevant else "None of the chunks are relevant"
+
+    # Save chunks to cache
+    chunk_cache[content_hash] = (summarized_text, is_relevant, reason)
+    save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE"])
 
     return summarized_text, is_relevant, reason
 
@@ -487,6 +500,7 @@ def generate_search_terms(subquestion, model):
         f"Translate the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
         f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
         f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
+        f"Only use the provided subquestion to generate search terms and do not use any other knowledge."
         f"Subquestion: {subquestion}"
     )
 
@@ -507,7 +521,7 @@ def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
         f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
         f"Ensure the subquestions collectively address all aspects of the main question. "
         f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
-        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. "
+        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. Only use the provided main question to generate subquestions and do not use any other knowledge."
         f"Only reply with the subquestions, each on a new line without using a list format."
     ) 
     response = generate_response_with_ollama(prompt, model)
@@ -525,7 +539,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
         f"Given the following main question: {query}\n\n"
         f"Current context: {context}\n\n"
         f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. "
-        f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself."
+        f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
     )
     response = generate_response_with_ollama(prompt, model)
     if response:
@@ -671,7 +685,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
         if all_contexts:
             prompt = (
                 f"Given the following context, answer the question: {original_query}\n\n"
-                f"Context provided contains both factual data and opinions. Use the context to formulate a comprehensive answer to the main question.\n\n"
+                f"Context provided contains both factual data and opinions. Use the context to formulate a comprehensive answer to the main question. Only use the provided context and do not use any other knowledge.\n\n"
                 f"Context:\n{all_contexts}\n\n"
                 f"Subquestions and their answers:\n{all_subquestion_answers}"
             )
@@ -726,6 +740,8 @@ if __name__ == "__main__":
     if google_cache:
         google_cache.close()
     if url_cache:
-        google_cache.close()
+        url_cache.close()
+    if chunk_cache:
+        chunk_cache.close()
     if browser:
         browser.quit()
