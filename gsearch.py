@@ -527,10 +527,10 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         f"Context: {query_context}\n\n"
         f"Content: {content}\n\n"
         f"Subquestion: {subquestion}\n\n"
-        f"Determine if the provided content is directly relevant to the context for answering the subquestion. "
-        f"Relevance should be based on specific, factual information contained within the provided context. Do not use any other knowledge. "
-        f"If relevant, provide a very detailed summary of the content that is self-contained and can stand on its own. Ensure the summary includes specific details and mentions all relevant information explicitly. Do not make general statements or reference any information not present in the provided content. "
-        f"Provide the response in the following plain JSON format without any Markdown formatting:\n"
+        f"Task: Determine if the provided content is directly relevant to the context for answering the subquestion. "
+        f"Relevance should be assessed based solely on the specific, factual information contained within the provided context. Do not incorporate any external knowledge or assumptions. "
+        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information. Avoid making general statements or referencing any information not present in the provided content. "
+        f"Response format: Provide the response in the following plain JSON format without any Markdown formatting:\n"
         f"{json_format}"
     )
     logging.info(f"Evaluating relevance and summarizing content for subquestion: {subquestion[:200]}...")
