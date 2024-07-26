@@ -408,7 +408,7 @@ def generate_search_terms(subquestion, model):
 def search_google_with_retries(query, num_results):
     for attempt in range(CONFIG["MAX_RETRIES"]):
         try:
-            if query in google_cache:
+            if query in google_cache and attempt == 0:
                 logging.info(f"Using cached Google search results for query: {query}")
                 return google_cache[query]
             
@@ -565,33 +565,51 @@ def split_and_process_chunks(subquestion, url, text, model):
 
     return summarized_text, is_relevant, reason
 
+def detect_automation_denial(content, model):
+    prompt = (
+        f"Determine if the following content indicates a denial due to automation, scraping, or similar reasons. "
+        f"Respond only with 'True' if there is any indication of denial and only with 'False' otherwise.\n\n"
+        f"Content: {content}"
+    )
+    response = generate_response_with_ollama(prompt, model).strip()
+    if response.lower().startswith('true'):
+        return True
+    return False
+
 def process_url(subquestion, url, model):
     logging.info(f"Fetching content for URL: {url}")
-    if url in url_cache:
-        logging.info(f"Using cached content for URL: {url}")
-        content, content_type = url_cache[url]
-    else:
+    retries = 0
+    while retries < CONFIG["MAX_RETRIES"]:
         content, content_type = fetch_content_with_browser(url)
         url_cache[url] = (content, content_type)
         save_cache(url_cache, CONFIG["URL_CACHE_FILE_PATH"])
-    
-    if content:
-        save_raw_content(subquestion, url, content, content_type)
-        if content_type == 'html':
-            logging.info(f"Cleaning HTML content for URL: {url}")
-            cleaned_html = clean_html_content(content)
-            extracted_text = extract_text_from_html(cleaned_html)
-        else:
-            return "", ""
 
-        cleaned_text = cleanup_extracted_text(extracted_text)
-        if cleaned_text:
-            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, model)
-            save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
-            logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
-            return summarized_text, url
-        else:
-            save_cleaned_content(subquestion, url, "", "", False, "Failed to extract cleaned text")
+        if content:
+            save_raw_content(subquestion, url, content, content_type)
+            if content_type == 'html':
+                logging.info(f"Cleaning HTML content for URL: {url}")
+                cleaned_html = clean_html_content(content)
+                extracted_text = extract_text_from_html(cleaned_html)
+            else:
+                return "", ""
+
+            cleaned_text = cleanup_extracted_text(extracted_text)
+            if detect_automation_denial(cleaned_text, CONFIG["MODEL_NAME"]):
+                retries += 1
+                logging.warning(f"Detected automation denial. Retrying {retries}/{CONFIG['MAX_RETRIES']}")
+                time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
+                ensure_browser()  # Reinitialize browser with a new user agent
+                continue
+
+            if cleaned_text:
+                summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, model)
+                save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
+                logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
+                return summarized_text, url
+            else:
+                save_cleaned_content(subquestion, url, "", "", False, "Failed to extract cleaned text")
+        retries += 1
+        time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
     return "", ""
 
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
@@ -789,6 +807,6 @@ if __name__ == "__main__":
     if google_cache:
         google_cache.close()
     if url_cache:
-        url_cache.close()
+        google_cache.close()
     if browser:
         browser.quit()
