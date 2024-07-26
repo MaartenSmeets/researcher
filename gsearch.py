@@ -205,25 +205,25 @@ def save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_rel
         }
         f.write(str(metadata))
 
-def save_to_file(output_dir, filename, content):
-    with open(os.path.join(output_dir, filename), 'w', encoding='utf-8') as f:
-        f.write(content)
+def append_to_file(output_dir, filename, content):
+    with open(os.path.join(output_dir, filename), 'a', encoding='utf-8') as f:
+        f.write(content + '\n')
 
 def save_final_output(main_question, subquestions, contexts, answers):
     main_question_hash = hashlib.md5(main_question.encode('utf-8')).hexdigest()
     output_dir = os.path.join(CONFIG["OUTPUT_DIRECTORY"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     
-    save_to_file(output_dir, "main_question.txt", main_question)
+    append_to_file(output_dir, "main_question.txt", main_question)
     subquestions_content = "\n".join(subquestions)
-    save_to_file(output_dir, "subquestions.txt", subquestions_content)
+    append_to_file(output_dir, "subquestions.txt", subquestions_content)
     
     combined_contexts = "\n\n".join(contexts)
     combined_answers = "\n\n".join(answers)
     
-    save_to_file(output_dir, "combined_contexts.txt", combined_contexts)
-    save_to_file(output_dir, "combined_answers.txt", combined_answers)
-    save_to_file(output_dir, "final_answer.txt", answers[-1])  # Save the final answer separately
+    append_to_file(output_dir, "combined_contexts.txt", combined_contexts)
+    append_to_file(output_dir, "combined_answers.txt", combined_answers)
+    append_to_file(output_dir, "final_answer.txt", answers[-1])  # Save the final answer separately
 
 def generate_response_with_ollama(prompt, model):
     if prompt in llm_cache:
@@ -492,7 +492,7 @@ def parse_json_response(response, json_format, model, max_retries=3):
                 response = request_llm_to_fix_json(response, error_message, json_format, model)
             error_history.add(error_message)
     return None
-
+   
 def request_llm_to_fix_json(response, error, json_format, model):
     prompt = (
         f"The following JSON response contains errors:\n\n"
@@ -723,9 +723,9 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     main_question_hash = hashlib.md5(original_query.encode('utf-8')).hexdigest()
     output_dir = os.path.join(CONFIG["OUTPUT_DIRECTORY"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
-    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_subquestion.txt", subquestion)
-    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(all_contexts))
-    save_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_answer.txt", "\n\n".join(all_subquestion_answers))
+    append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_subquestion.txt", subquestion)
+    append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(all_contexts))
+    append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_answer.txt", "\n\n".join(all_subquestion_answers))
 
     return all_contexts, all_references, all_subquestion_answers
 
@@ -807,22 +807,26 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
     return False
 
 if __name__ == "__main__":
-    original_query = (
-        "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
-    )
+    try:
+        original_query = (
+            "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
+        )
 
-    logging.info(f"Starting script with original query: {original_query}")
-    subquestions = rephrase_query_to_initial_subquestions(original_query, CONFIG["MODEL_NAME"], CONFIG["NUM_INITIAL_SUBQUESTIONS"])
-    if subquestions:
-        search_and_extract(subquestions, CONFIG["MODEL_NAME"], CONFIG["NUM_SEARCH_RESULTS_GOOGLE"], CONFIG["NUM_SEARCH_RESULTS_VECTOR"], original_query)
-    logging.info("Script completed.")
-    if llm_cache:
-        llm_cache.close()
-    if google_cache:
-        google_cache.close()
-    if url_cache:
-        google_cache.close()
-    if chunk_cache:
-        chunk_cache.close()
-    if browser:
-        browser.quit()
+        logging.info(f"Starting script with original query: {original_query}")
+        subquestions = rephrase_query_to_initial_subquestions(original_query, CONFIG["MODEL_NAME"], CONFIG["NUM_INITIAL_SUBQUESTIONS"])
+        if subquestions:
+            search_and_extract(subquestions, CONFIG["MODEL_NAME"], CONFIG["NUM_SEARCH_RESULTS_GOOGLE"], CONFIG["NUM_SEARCH_RESULTS_VECTOR"], original_query)
+        logging.info("Script completed.")
+    except Exception as e:
+        logging.error(f"Uncaught exception: {e}")
+    finally:
+        if llm_cache:
+            llm_cache.close()
+        if google_cache:
+            google_cache.close()
+        if url_cache:
+            google_cache.close()
+        if chunk_cache:
+            chunk_cache.close()
+        if browser:
+            browser.quit()
