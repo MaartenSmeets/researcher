@@ -47,6 +47,7 @@ CONFIG = {
     "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',  # File path for the LLM response cache
     "GOOGLE_CACHE_FILE_PATH": 'cache/google_cache.db',  # File path for the Google search results cache
     "URL_CACHE_FILE_PATH": 'cache/url_cache.db',  # File path for the URL content cache
+    "CHUNK_CACHE_FILE_PATH": 'cache/chunk_cache.db',  # File path for the document chunk cache
 
     # Content extraction and processing configuration
     "EXTRACTED_CONTENT_DIRECTORY": 'extracted_content',  # Directory to store extracted content
@@ -128,6 +129,7 @@ def open_cache(cache_file):
 llm_cache = open_cache(CONFIG["LLM_CACHE_FILE_PATH"])
 google_cache = open_cache(CONFIG["GOOGLE_CACHE_FILE_PATH"])
 url_cache = open_cache(CONFIG["URL_CACHE_FILE_PATH"])
+chunk_cache = open_cache(CONFIG["CHUNK_CACHE_FILE_PATH"])
 
 def save_cache(cache, cache_file):
     try:
@@ -542,23 +544,35 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         return False, "Failed to parse JSON response", ""
 
 def split_and_process_chunks(subquestion, url, text, model):
-    embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
-    splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
-    
-    document = Document(text=text)
-    nodes = splitter.build_semantic_nodes_from_documents([document])
-    
-    chunk_summaries = []
-    chunk_relevance = []
+    # Generate a hash of the text to use as a cache key
+    text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
 
-    for chunk_id, node in enumerate(nodes, 1):
-        chunk = node.text
-        is_relevant, reason, summary = evaluate_and_summarize_content(chunk, subquestion, subquestion, model)
-        if is_relevant:
-            save_chunk_content(subquestion, url, chunk, summary, is_relevant, reason, chunk_id)
-            chunk_summaries.append(summary)
-            chunk_relevance.append(is_relevant)
+    # Check if the chunks are already in the cache
+    if text_hash in chunk_cache:
+        logging.info(f"Using cached chunks for text hash: {text_hash}")
+        chunk_summaries, chunk_relevance = chunk_cache[text_hash]
+    else:
+        embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
+        splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
     
+        document = Document(text=text)
+        nodes = splitter.build_semantic_nodes_from_documents([document])
+        
+        chunk_summaries = []
+        chunk_relevance = []
+
+        for chunk_id, node in enumerate(nodes, 1):
+            chunk = node.text
+            is_relevant, reason, summary = evaluate_and_summarize_content(chunk, subquestion, subquestion, model)
+            if is_relevant:
+                save_chunk_content(subquestion, url, chunk, summary, is_relevant, reason, chunk_id)
+                chunk_summaries.append(summary)
+                chunk_relevance.append(is_relevant)
+
+        # Save the chunks to the cache
+        chunk_cache[text_hash] = (chunk_summaries, chunk_relevance)
+        save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE_PATH"])
+
     summarized_text = " ".join(chunk_summaries)
     is_relevant = any(chunk_relevance)
     reason = "At least one chunk is relevant" if is_relevant else "None of the chunks are relevant"
@@ -808,5 +822,7 @@ if __name__ == "__main__":
         google_cache.close()
     if url_cache:
         google_cache.close()
+    if chunk_cache:
+        chunk_cache.close()
     if browser:
         browser.quit()
