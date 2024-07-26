@@ -322,13 +322,15 @@ def fetch_content_with_browser(url):
     try:
         logging.info(f"Navigating to URL: {url}")
         browser.get(url)
-        WebDriverWait(browser, CONFIG["REQUEST_DELAY_SECONDS"]).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        WebDriverWait(browser, CONFIG["REQUEST_DELAY_SECONDS"]).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
         logging.info("Page loaded successfully")
 
         try:
             cookie_buttons = WebDriverWait(browser, 5).until(
                 EC.presence_of_all_elements_located((
-                    By.XPATH, 
+                    By.XPATH,
                     "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'proceed') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
                 ))
             )
@@ -338,13 +340,12 @@ def fetch_content_with_browser(url):
                         logging.debug("Found clickable cookie pop-up button, attempting to click it")
                         cookie_button.click()
                         logging.debug("Clicked cookie pop-up button, waiting for it to disappear")
-                        
                         WebDriverWait(browser, 5).until(EC.invisibility_of_element(cookie_button))
                         logging.info("Cookie pop-up disappeared successfully")
                 except Exception as e:
-                    logging.debug(f"Could not click the button")
+                    logging.debug(f"Could not click the button: {e}")
         except Exception as e:
-            logging.debug(f"No cookie pop-up found or could not locate buttons")
+            logging.debug(f"No cookie pop-up found or could not locate buttons: {e}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY_SECONDS"], CONFIG["REQUEST_DELAY_SECONDS"] + 2))
         page_source = browser.page_source
@@ -450,7 +451,7 @@ def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
     response = generate_response_with_ollama(prompt, model)
     if response:
         subquestions = response.split('\n')
-        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip() and not sq.isspace()]))
         return unique_subquestions
     else:
         logging.error("Failed to generate initial subquestions.")
@@ -467,7 +468,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
     response = generate_response_with_ollama(prompt, model)
     if response:
         subquestions = response.split('\n')
-        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip()]))
+        unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip() and not sq.isspace()]))
         return subquestions
     else:
         logging.error("Failed to generate follow-up subquestions.")
@@ -514,7 +515,7 @@ def request_llm_to_fix_json_creatively(response, error, json_format, model):
 
 def evaluate_and_summarize_content(content, query_context, subquestion, model):
     json_format = (
-        '{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<very detailed summary if relevant>"\n}'
+        '{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise detailed summary if relevant>"\n}'
     )
     prompt = (
         f"Context: {query_context}\n\n"
