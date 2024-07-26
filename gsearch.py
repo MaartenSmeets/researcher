@@ -709,8 +709,14 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     if relevant_answers:
         prompt = (
-            f"Given the following relevant excerpts, provide a single, concise, and detailed answer to the subquestion: {subquestion}\n\n"
-            f"Relevant excerpts:\n" + "\n\n".join(relevant_answers)
+            f"Given the following relevant excerpts, provide a single, concise, and detailed answer to the subquestion: {{subquestion}}\n\n"
+            f"Relevant excerpts:\n{{relevant_excerpts}}\n\n"
+            f"Your task is to synthesize these excerpts into a cohesive answer. Ensure that your response is:\n\n"
+            f"1. Comprehensive: Address all aspects of the subquestion thoroughly.\n"
+            f"2. Detailed: Include specific details and evidence from the excerpts to support your answer.\n"
+            f"3. Accurate: Base your answer solely on the provided excerpts without introducing external information.\n"
+            f"4. Clear and Structured: Organize your response logically and ensure clarity.\n\n"
+            f"Additionally, highlight the significance of each detail included in your answer and how it directly relates to the subquestion. Avoid generalizations and ensure that your response is self-contained and can stand alone without requiring further context."
         )
         final_subquestion_answer = generate_response_with_ollama(prompt, model)
         all_subquestion_answers = [final_subquestion_answer]
