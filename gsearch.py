@@ -389,6 +389,10 @@ def cleanup_extracted_text(text):
     return text
 
 def generate_search_terms(subquestion, model):
+    if not subquestion.strip():  # Ensure subquestion is not empty
+        logging.error("Subquestion is empty, skipping search term generation.")
+        return subquestion
+
     prompt = (
         f"Transform the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
         f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
