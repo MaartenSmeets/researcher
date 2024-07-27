@@ -337,7 +337,7 @@ def extract_text_from_html(cleaned_html):
 
 def cleanup_extracted_text(text):
     text = re.sub(r'\n\s*\n', '\n\n', text)
-    text is '\n'.join([line.strip() for line in text.split('\n')])
+    text = '\n'.join([line.strip() for line in text.split('\n')])
     text = re.sub(r'\s+', ' ', text)
     return text
 
@@ -583,19 +583,17 @@ def process_url(subquestion, url, model):
         time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
     return "", ""
 
-# Ensure the context parameter is passed down appropriately in the function calls
 def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query, context=""):
     visited_urls = set()
     domain_timestamps = {}
-    all_contexts = []
-    all_references = []
+    subquestion_contexts = []
+    subquestion_references = []
     urls_to_process = []
     documents_to_process = []
     relevant_answers = []
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    # Incorporate context into search terms generation
     search_terms = generate_search_terms(f"{subquestion} {context}", model)
     logging.info(f"Translated search terms: {search_terms}")
 
@@ -645,9 +643,9 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 current_time = time.time()
 
             extracted_text, reference = process_url(subquestion, current_url, model)
-            if extracted_text.strip() and f"Content from {current_url}:\n{extracted_text}" not in all_contexts:
-                all_contexts.append(f"Content from {current_url}:\n{extracted_text}")
-                all_references.append(reference)
+            if extracted_text.strip() and f"Content from {current_url}:\n{extracted_text}" not in subquestion_contexts:
+                subquestion_contexts.append(f"Content from {current_url}:\n{extracted_text}")
+                subquestion_references.append(reference)
                 relevant_answers.append(extracted_text)
                 visited_urls.add(current_url)
                 domain_timestamps[domain] = current_time
@@ -657,9 +655,9 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             logging.info(f"Evaluating content relevance for document from vector store with metadata: {meta}")
             summarized_text, is_relevant, reason = split_and_process_chunks(f"{subquestion} {context}", meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
-            if summarized_text.strip() and f"Content from {source}:\n{summarized_text}" not in all_contexts:
-                all_contexts.append(f"Content from {source}:\n{summarized_text}")
-                all_references.append(source)
+            if summarized_text.strip() and f"Content from {source}:\n{summarized_text}" not in subquestion_contexts:
+                subquestion_contexts.append(f"Content from {source}:\n{summarized_text}")
+                subquestion_references.append(source)
                 relevant_answers.append(summarized_text)
                 save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
                 logging.info(f"Document from vector store: {doc[:200]}")
@@ -682,17 +680,17 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     else:
         all_subquestion_answers = ["No relevant information found."]
 
-    logging.info(f"Context gathered for subquestion '{subquestion}': {all_contexts}")
+    logging.info(f"Context gathered for subquestion '{subquestion}': {subquestion_contexts}")
     logging.info(f"Answer gathered for subquestion '{subquestion}': {all_subquestion_answers}")
 
     main_question_hash = hashlib.md5(original_query.encode('utf-8')).hexdigest()
     output_dir = os.path.join(CONFIG["OUTPUT_DIRECTORY"], main_question_hash)
     os.makedirs(output_dir, exist_ok=True)
     append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_subquestion.txt", subquestion)
-    append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(all_contexts))
+    append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_context.txt", "\n\n".join(subquestion_contexts))
     append_to_file(output_dir, f"{hashlib.md5(subquestion.encode('utf-8')).hexdigest()}_answer.txt", "\n\n".join(all_subquestion_answers))
 
-    return all_contexts, all_references, all_subquestion_answers
+    return subquestion_contexts, subquestion_references, all_subquestion_answers
 
 def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context=""):
     all_contexts = []
@@ -700,12 +698,10 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
     all_subquestion_answers = []
     main_question_answered = False
 
-    # New list to keep track of all subquestions used
     all_subquestions_used = subquestions[:]
 
     while subquestions:
         subquestion = subquestions.pop()
-        # Include context in the processing of each subquestion
         subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query, context)
 
         if subquestion_context:
@@ -713,20 +709,20 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             all_references.extend(references)
             all_subquestion_answers.extend(subquestion_answers)
         else:
-            context_str = "\n\n".join(all_contexts) + "\n\n" + context  # Combine existing context with the provided context
+            context_str = "\n\n".join(all_contexts) + "\n\n" + context
             refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
             subquestions.extend(refined_subquestions)
-            all_subquestions_used.extend(refined_subquestions)  # Add newly generated subquestions
+            all_subquestions_used.extend(refined_subquestions)
 
     if not main_question_answered:
-        context_str = "\n\n".join(all_contexts) + "\n\n" + context  # Combine existing context with the provided context
+        context_str = "\n\n".join(all_contexts) + "\n\n" + context
         remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
         subquestions.extend(remaining_subquestions)
-        all_subquestions_used.extend(remaining_subquestions)  # Add newly generated subquestions
+        all_subquestions_used.extend(remaining_subquestions)
         search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context_str)
 
     if all_contexts:
-        combined_contexts = "\n\n".join(all_contexts) + "\n\n" + context  # Combine gathered contexts with the provided context
+        combined_contexts = "\n\n".join(all_contexts) + "\n\n" + context
         prompt = (
             f"Given the following context, subquestions, and their answers, answer the main question: {original_query}\n\n"
             f"The provided context encompasses both factual information and a range of opinions. In addition, several subquestions related to the main question have been answered, and these answers should be considered when formulating your response. Your task is to use solely the supplied context, along with the subquestions and their answers, to construct a comprehensive and detailed response to the main question. Refrain from incorporating any external knowledge or information.\n\n"
@@ -735,7 +731,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
             f"Ensure your answer is exhaustive, drawing upon all relevant details from the context and the subquestion answers. Provide a clear and well-structured response that fully addresses the main question."
         )
         response = generate_response_with_ollama(prompt, model)
-        save_final_output(original_query, all_subquestions_used, all_contexts, [response])  # Use the updated list
+        save_final_output(original_query, all_subquestions_used, all_contexts, [response])
 
 def check_if_main_question_answered(contexts, subquestion_answers, main_question, subquestions):
     combined_contexts = "\n\n".join(contexts)
