@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import chromadb
 from bs4 import BeautifulSoup
 from googlesearch import search
+from googlesearch import user_agents as google_user_agents
 from huggingface_hub import login
 from lxml import etree, html
 from selenium import webdriver
@@ -255,9 +256,17 @@ def init_browser():
     options.add_argument("--enable-javascript")
     options.add_argument("--enable-cookies")
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    return driver
+    for attempt in range(CONFIG["MAX_RETRIES"]):
+        try:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+            return driver
+        except Exception as e:
+            logging.error(f"Failed to initialize browser on attempt {attempt + 1}/{CONFIG['MAX_RETRIES']}: {e}")
+            if attempt < CONFIG["MAX_RETRIES"] - 1:
+                time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
+    logging.error("Exhausted retries for browser initialization")
+    return None
 
 browser = None
 
@@ -271,6 +280,9 @@ def ensure_browser():
             except Exception as e:
                 logging.error(f"Failed to quit the browser: {e}")
         browser = init_browser()
+        if browser is None:
+            raise RuntimeError("Failed to initialize browser after multiple attempts")
+
 
 def fetch_content_with_browser(url):
     ensure_browser()
@@ -371,13 +383,13 @@ def search_google_with_retries(query, num_results):
                 logging.info(f"Using cached Google search results for query: {query}")
                 return google_cache[query]
             
-            ua.update()
+            google_user_agents.user_agents = [ua.random]
             results = list(search(query, num_results=num_results))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             return results
         except Exception as e:
-            if hasattr(e, 'response') and e.response.status_code == 429:
+            if e.response.status_code == 429:
                 retry_after = CONFIG["INITIAL_RETRY_DELAY_SECONDS"] * (2 ** attempt)
                 logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
                 time.sleep(retry_after)
