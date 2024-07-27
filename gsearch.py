@@ -337,7 +337,7 @@ def extract_text_from_html(cleaned_html):
 
 def cleanup_extracted_text(text):
     text = re.sub(r'\n\s*\n', '\n\n', text)
-    text = '\n'.join([line.strip() for line in text.split('\n')])
+    text is '\n'.join([line.strip() for line in text.split('\n')])
     text = re.sub(r'\s+', ' ', text)
     return text
 
@@ -645,7 +645,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 current_time = time.time()
 
             extracted_text, reference = process_url(subquestion, current_url, model)
-            if extracted_text:
+            if extracted_text.strip() and f"Content from {current_url}:\n{extracted_text}" not in all_contexts:
                 all_contexts.append(f"Content from {current_url}:\n{extracted_text}")
                 all_references.append(reference)
                 relevant_answers.append(extracted_text)
@@ -657,12 +657,12 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
             logging.info(f"Evaluating content relevance for document from vector store with metadata: {meta}")
             summarized_text, is_relevant, reason = split_and_process_chunks(f"{subquestion} {context}", meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
-
-            all_contexts.append(f"Content from {source}:\n{summarized_text}")
-            all_references.append(source)
-            relevant_answers.append(summarized_text)
-            save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
-            logging.info(f"Document from vector store: {doc[:200]}")
+            if summarized_text.strip() and f"Content from {source}:\n{summarized_text}" not in all_contexts:
+                all_contexts.append(f"Content from {source}:\n{summarized_text}")
+                all_references.append(source)
+                relevant_answers.append(summarized_text)
+                save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
+                logging.info(f"Document from vector store: {doc[:200]}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY_SECONDS"], CONFIG["REQUEST_DELAY_SECONDS"] + 2))
 
