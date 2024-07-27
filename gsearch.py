@@ -11,10 +11,8 @@ from urllib.parse import urlparse
 import chromadb
 from bs4 import BeautifulSoup
 from googlesearch import search
-from googlesearch import user_agents as google_user_agents
 from huggingface_hub import login
 from lxml import etree, html
-from ollama import generate
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
@@ -23,7 +21,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from torch import device as torch_device
-
+from fake_useragent import UserAgent
+from ollama import generate
 from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core import Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -243,53 +242,7 @@ def generate_response_with_ollama(prompt, model):
         logging.error(f"Failed to generate response with Ollama: {e}")
         return ""
 
-def generate_user_agents(num_user_agents, model):
-    prompt = (
-        f"Generate {num_user_agents} realistic and commonly used user-agent strings for web browsers. "
-        f"Include a variety of operating systems (e.g., Windows, macOS, Linux, Android, iOS) and browser versions "
-        f"(e.g., Chrome, Firefox, Safari, Edge) to simulate different types of users. "
-        f"Output each user-agent string on a new line without any additional text or formatting."
-    )
-    response = generate_response_with_ollama(prompt, model)
-    if response:
-        user_agents = [ua.strip() for ua in response.split('\n') if ua.strip()]
-        return user_agents
-    else:
-        logging.error("Failed to generate user agents.")
-        return []
-
-class UserAgentManager:
-    def __init__(self, model, num_user_agents):
-        self.model = model
-        self.num_user_agents = num_user_agents
-        self.user_agents = []
-        self.current_index = 0
-        logging.info(f"Initializing UserAgentManager with model {self.model} and {self.num_user_agents} user agents.")
-        self._generate_user_agents()
-
-    def _generate_user_agents(self):
-        logging.info("Generating new user agents...")
-        self.user_agents = generate_user_agents(self.num_user_agents, self.model)
-        self.current_index = 0
-        if self.user_agents:
-            logging.info(f"Generated {len(self.user_agents)} new user agents.")
-        else:
-            logging.error("Failed to generate new user agents.")
-
-    def get_next_user_agent(self):
-        if not self.user_agents or self.current_index >= len(self.user_agents):
-            logging.warning("User agent list is empty or index out of range, regenerating user agents.")
-            self._generate_user_agents()
-        if self.user_agents:
-            user_agent = self.user_agents[self.current_index]
-            self.current_index += 1
-            logging.debug(f"Returning user agent: {user_agent}")
-            return user_agent
-        else:
-            logging.error("Failed to get a new user agent. User agent list is empty after regeneration.")
-            return None
-
-user_agent_manager = UserAgentManager(CONFIG["MODEL_NAME"], CONFIG["NUM_USER_AGENTS"])
+ua = UserAgent()
 
 def init_browser():
     options = Options()
@@ -298,7 +251,7 @@ def init_browser():
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument(f"user-agent={user_agent_manager.get_next_user_agent()}")
+    options.add_argument(f"user-agent={ua.random}")
     options.add_argument("--enable-javascript")
     options.add_argument("--enable-cookies")
 
@@ -418,7 +371,7 @@ def search_google_with_retries(query, num_results):
                 logging.info(f"Using cached Google search results for query: {query}")
                 return google_cache[query]
             
-            google_user_agents.user_agents = [user_agent_manager.get_next_user_agent()]
+            ua.update()
             results = list(search(query, num_results=num_results))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
@@ -449,7 +402,7 @@ def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
     prompt = (
         f"Given the following main question: {query}\n\n"
         f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
-        f"Ensure the subquestions collectively address all aspects of the main question. "
+        f"Ensure the subquestions collectively address all aspects of the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
         f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
         f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. Only use the provided main question to generate subquestions and do not use any other knowledge."
         f"Only reply with the subquestions, each on a new line without using a list format."
@@ -467,7 +420,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
     prompt = (
         f"Given the following main question: {query}\n\n"
         f"Current context: {context}\n\n"
-        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. "
+        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. Ensure the subquestions collectively address all aspects of the required but missing information to answer the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
         f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
         f"Only reply with the subquestions, each on a new line without using a list format."
     )
