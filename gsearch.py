@@ -630,7 +630,8 @@ def process_url(subquestion, url, model):
         time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
     return "", ""
 
-def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query):
+# Ensure the context parameter is passed down appropriately in the function calls
+def process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query, context=""):
     visited_urls = set()
     domain_timestamps = {}
     all_contexts = []
@@ -641,7 +642,8 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    search_terms = generate_search_terms(subquestion, model)
+    # Incorporate context into search terms generation
+    search_terms = generate_search_terms(f"{subquestion} {context}", model)
     logging.info(f"Translated search terms: {search_terms}")
 
     results = search_google_with_retries(search_terms, num_search_results_google)
@@ -651,7 +653,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     if os.path.exists(CONFIG["VECTOR_STORE_DIRECTORY"]):
         vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_DIRECTORY"])
         collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION_NAME"])
-        vector_results = query_vector_store(collection, subquestion, top_k=num_search_results_vector)
+        vector_results = query_vector_store(collection, f"{subquestion} {context}", top_k=num_search_results_vector)
 
         sources_processed = set()
         combined_documents = {}
@@ -700,7 +702,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
             logging.info(f"Evaluating content relevance for document from vector store with metadata: {meta}")
-            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, meta.get('source', 'vector_store'), doc, model)
+            summarized_text, is_relevant, reason = split_and_process_chunks(f"{subquestion} {context}", meta.get('source', 'vector_store'), doc, model)
             source = meta.get('source', 'vector_store')
 
             all_contexts.append(f"Content from {source}:\n{summarized_text}")
@@ -750,39 +752,37 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
 
     while subquestions:
         subquestion = subquestions.pop()
-        subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query)
+        # Include context in the processing of each subquestion
+        subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query, context)
 
         if subquestion_context:
             all_contexts.extend(subquestion_context)
             all_references.extend(references)
             all_subquestion_answers.extend(subquestion_answers)
-
-            main_question_answered = check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query, subquestions)
-            if main_question_answered:
-                break
         else:
-            context_str = "\n\n".join(all_contexts)
+            context_str = "\n\n".join(all_contexts) + "\n\n" + context  # Combine existing context with the provided context
             refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
             subquestions.extend(refined_subquestions)
             all_subquestions_used.extend(refined_subquestions)  # Add newly generated subquestions
 
     if not main_question_answered:
-        context_str = "\n\n".join(all_contexts)
+        context_str = "\n\n".join(all_contexts) + "\n\n" + context  # Combine existing context with the provided context
         remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
         subquestions.extend(remaining_subquestions)
         all_subquestions_used.extend(remaining_subquestions)  # Add newly generated subquestions
         search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context_str)
-    else:
-        if all_contexts:
-            prompt = (
-                f"Given the following context, subquestions, and their answers, answer the main question: {original_query}\n\n"
-                f"The provided context encompasses both factual information and a range of opinions. In addition, several subquestions related to the main question have been answered, and these answers should be considered when formulating your response. Your task is to use solely the supplied context, along with the subquestions and their answers, to construct a comprehensive and detailed response to the main question. Refrain from incorporating any external knowledge or information.\n\n"
-                f"Context:\n{all_contexts}\n\n"
-                f"Subquestions and their answers:\n{all_subquestion_answers}\n\n"
-                f"Ensure your answer is exhaustive, drawing upon all relevant details from the context and the subquestion answers. Provide a clear and well-structured response that fully addresses the main question."
-            )
-            response = generate_response_with_ollama(prompt, model)
-            save_final_output(original_query, all_subquestions_used, all_contexts, [response])  # Use the updated list
+
+    if all_contexts:
+        combined_contexts = "\n\n".join(all_contexts) + "\n\n" + context  # Combine gathered contexts with the provided context
+        prompt = (
+            f"Given the following context, subquestions, and their answers, answer the main question: {original_query}\n\n"
+            f"The provided context encompasses both factual information and a range of opinions. In addition, several subquestions related to the main question have been answered, and these answers should be considered when formulating your response. Your task is to use solely the supplied context, along with the subquestions and their answers, to construct a comprehensive and detailed response to the main question. Refrain from incorporating any external knowledge or information.\n\n"
+            f"Context:\n{combined_contexts}\n\n"
+            f"Subquestions and their answers:\n{all_subquestion_answers}\n\n"
+            f"Ensure your answer is exhaustive, drawing upon all relevant details from the context and the subquestion answers. Provide a clear and well-structured response that fully addresses the main question."
+        )
+        response = generate_response_with_ollama(prompt, model)
+        save_final_output(original_query, all_subquestions_used, all_contexts, [response])  # Use the updated list
 
 def check_if_main_question_answered(contexts, subquestion_answers, main_question, subquestions):
     combined_contexts = "\n\n".join(contexts)
