@@ -716,7 +716,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
     if relevant_answers:
         prompt = (
             f"Given the following relevant excerpts, provide a single, concise, and detailed answer to the subquestion: {subquestion}\n\n"
-            f"Relevant excerpts:\n{{relevant_answers}}\n\n"
+            f"Relevant excerpts:\n{relevant_answers}\n\n"
             f"Your task is to synthesize these excerpts into a cohesive answer. Ensure that your response is:\n\n"
             f"1. Comprehensive: Address all aspects of the subquestion thoroughly.\n"
             f"2. Detailed: Include specific details and evidence from the excerpts to support your answer.\n"
