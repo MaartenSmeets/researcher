@@ -377,7 +377,7 @@ def search_google_with_retries(query, num_results):
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             return results
         except Exception as e:
-            if e.response.status_code == 429:
+            if hasattr(e, 'response') and e.response.status_code == 429:
                 retry_after = CONFIG["INITIAL_RETRY_DELAY_SECONDS"] * (2 ** attempt)
                 logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
                 time.sleep(retry_after)
