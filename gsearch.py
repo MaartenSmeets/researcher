@@ -518,6 +518,29 @@ def evaluate_and_summarize_content(content, subquestion, main_question, model):
         logging.error(f"Failed to evaluate and summarize content for subquestion: {subquestion[:200]}")
         return False, "Failed to parse JSON response", "", ""
 
+def process_chunks(nodes, subquestion, url, main_question, model):
+    chunk_summaries = []
+    chunk_relevance = []
+    chunk_main_relevance = []
+
+    for chunk_id, node in enumerate(nodes, 1):
+        chunk = node.text
+        metadata = node.metadata  # Fetching metadata for the chunk
+        
+        # Filter metadata to include only fields with "title" in their key names
+        filtered_metadata = {k: v for k, v in metadata.items() if 'title' in k.lower()}
+        metadata_str = "\n".join([f"{k}: {v}" for k, v in filtered_metadata.items()])
+        
+        is_relevant, reason, summary, main_question_relevance = evaluate_and_summarize_content(chunk, subquestion, main_question, model)
+        if is_relevant:
+            combined_chunk = f"Metadata: {metadata_str}\n\n{chunk}"  # Adding filtered metadata to the start of the chunk content
+            save_chunk_content(subquestion, url, combined_chunk, summary, is_relevant, reason, chunk_id)
+            chunk_summaries.append(summary)
+            chunk_relevance.append(is_relevant)
+            chunk_main_relevance.append(main_question_relevance)
+
+    return chunk_summaries, chunk_relevance, chunk_main_relevance
+
 def split_and_process_chunks(subquestion, url, text, main_question, model):
     # Generate a hash of the text to use as a cache key
     text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
@@ -527,31 +550,17 @@ def split_and_process_chunks(subquestion, url, text, main_question, model):
         logging.info(f"Using cached chunks for text hash: {text_hash}")
         chunk_summaries, chunk_relevance, chunk_main_relevance = chunk_cache[text_hash]
     else:
-        embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
-        splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
-    
-        document = Document(text=text)
-        nodes = splitter.build_semantic_nodes_from_documents([document])
+        if len(text) <= CONFIG["TEXT_SNIPPET_LENGTH"]:
+            # Process the entire text as a whole
+            nodes = [Document(text=text)]
+        else:
+            embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
+            splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
         
-        chunk_summaries = []
-        chunk_relevance = []
-        chunk_main_relevance = []
-
-        for chunk_id, node in enumerate(nodes, 1):
-            chunk = node.text
-            metadata = node.metadata  # Fetching metadata for the chunk
-            
-            # Filter metadata to include only fields with "title" in their key names
-            filtered_metadata = {k: v for k, v in metadata.items() if 'title' in k.lower()}
-            metadata_str = "\n".join([f"{k}: {v}" for k, v in filtered_metadata.items()])
-            
-            is_relevant, reason, summary, main_question_relevance = evaluate_and_summarize_content(chunk, subquestion, main_question, model)
-            if is_relevant:
-                combined_chunk = f"Metadata: {metadata_str}\n\n{chunk}"  # Adding filtered metadata to the start of the chunk content
-                save_chunk_content(subquestion, url, combined_chunk, summary, is_relevant, reason, chunk_id)
-                chunk_summaries.append(summary)
-                chunk_relevance.append(is_relevant)
-                chunk_main_relevance.append(main_question_relevance)
+            document = Document(text=text)
+            nodes = splitter.build_semantic_nodes_from_documents([document])
+        
+        chunk_summaries, chunk_relevance, chunk_main_relevance = process_chunks(nodes, subquestion, url, main_question, model)
 
         # Save the chunks to the cache
         chunk_cache[text_hash] = (chunk_summaries, chunk_relevance, chunk_main_relevance)
