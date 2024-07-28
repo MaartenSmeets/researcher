@@ -421,7 +421,7 @@ def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
         f"Generate {num_subquestions} detailed and specific subquestions. These subquestions should help find information relevant to answering both the subquestions and the main question. "
         f"You may generalize the subquestions if it improves the relevance of the results. Ensure that the subquestions collectively cover all aspects of the main question, including any constraints mentioned. "
         f"Each subquestion should be self-contained, providing enough context and keywords to be useful independently. Only use the provided main question to generate subquestions, without referencing any additional information."
-        f"Please provide the subquestions, each on a new line without numbering."
+        f"Please provide only the subquestions, each on a new line without numbering. Do not provide any additional information or explanations."
     )   
     response = generate_response_with_ollama(prompt, model)
     if response:
