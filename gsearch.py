@@ -539,9 +539,16 @@ def split_and_process_chunks(subquestion, url, text, main_question, model):
 
         for chunk_id, node in enumerate(nodes, 1):
             chunk = node.text
+            metadata = node.metadata  # Fetching metadata for the chunk
+            
+            # Filter metadata to include only fields with "title" in their key names
+            filtered_metadata = {k: v for k, v in metadata.items() if 'title' in k.lower()}
+            metadata_str = "\n".join([f"{k}: {v}" for k, v in filtered_metadata.items()])
+            
             is_relevant, reason, summary, main_question_relevance = evaluate_and_summarize_content(chunk, subquestion, main_question, model)
             if is_relevant:
-                save_chunk_content(subquestion, url, chunk, summary, is_relevant, reason, chunk_id)
+                combined_chunk = f"Metadata: {metadata_str}\n\n{chunk}"  # Adding filtered metadata to the start of the chunk content
+                save_chunk_content(subquestion, url, combined_chunk, summary, is_relevant, reason, chunk_id)
                 chunk_summaries.append(summary)
                 chunk_relevance.append(is_relevant)
                 chunk_main_relevance.append(main_question_relevance)
