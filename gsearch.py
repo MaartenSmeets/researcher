@@ -327,7 +327,7 @@ def clean_html_content(html_content):
         for element in tree.xpath('//script|//style|//header|//footer|//nav|//aside|//form'):
             element.drop_tree()
 
-        return etree.to_string(tree, method='html', encoding='unicode')
+        return etree.tostring(tree, method='html', encoding='unicode')
     except Exception as e:
         logging.error(f"Error in cleaning HTML: {e}")
         return ""
@@ -786,7 +786,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
 if __name__ == "__main__":
     try:
         original_query = (
-            "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells. A good source of inspiration are class specific handbooks. She has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
+            "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew content. A good source of inspiration are class specific handbooks. She has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective feats that would be beneficial for my character to have. I already have crossbow expert and sharpshooter. Include specific details and explanations for why each feat is beneficial."
         )
 
         logging.info(f"Starting script with original query: {original_query}")
