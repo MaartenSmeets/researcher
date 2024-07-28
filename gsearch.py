@@ -489,19 +489,17 @@ def request_llm_to_fix_json_creatively(response, error, json_format, model):
     fixed_response = generate_response_with_ollama(prompt, model)
     return fixed_response
 
-def evaluate_and_summarize_content(content, query_context, subquestion, main_question, model):
+def evaluate_and_summarize_content(content, subquestion, main_question, model):
     json_format = (
         '{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise detailed summary if relevant>",\n  "main_question_relevance": "<parts that help answer the main question>"\n}'
     )
     prompt = (
-        f"Context: {query_context}\n\n"
-        f"Content: {content}\n\n"
-        f"Subquestion: {subquestion}\n\n"
         f"Main Question: {main_question}\n\n"
-        f"Task: Determine if the provided content is directly relevant to the context for answering the subquestion. "
-        f"Additionally, determine if it can also help answer the main question. Relevance should be assessed based solely on the specific, factual information contained within the provided context. Do not incorporate any external knowledge or assumptions. "
-        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information. Avoid making general statements or referencing any information not present in the provided content. "
-        f"Moreover, specify the parts of the content that can help in answering the main question.\n"
+        f"Subquestion: {subquestion}\n\n"
+        f"Content: {content}\n\n"
+        f"Task: Determine if the provided content is directly relevant to the subquestion. "
+        f"Additionally, assess whether the content can help answer the main question. Relevance should be assessed based solely on the specific, factual information contained within the provided content. Do not incorporate any external knowledge or assumptions. "
+        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information for answering either main question or subquestion. Avoid making general statements or referencing any information not present in the provided content. "
         f"Response format: Provide the response in the following plain JSON format without any Markdown formatting:\n"
         f"{json_format}"
     )
@@ -514,7 +512,7 @@ def evaluate_and_summarize_content(content, query_context, subquestion, main_que
         reason = result.get("reason", "No reason provided")
         summary = result.get("summary", "") or ""
         main_question_relevance = result.get("main_question_relevance", "") or ""
-        logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}, Main Question Relevance: {main_question_relevance[:200]}")
+        logging.info(f"Content relevance and summary result: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}, Main Question Relevance: {main_question_relevance[:200]}")
         return is_relevant, reason, summary, main_question_relevance
     else:
         logging.error(f"Failed to evaluate and summarize content for subquestion: {subquestion[:200]}")
@@ -541,7 +539,7 @@ def split_and_process_chunks(subquestion, url, text, main_question, model):
 
         for chunk_id, node in enumerate(nodes, 1):
             chunk = node.text
-            is_relevant, reason, summary, main_question_relevance = evaluate_and_summarize_content(chunk, subquestion, subquestion, main_question, model)
+            is_relevant, reason, summary, main_question_relevance = evaluate_and_summarize_content(chunk, subquestion, main_question, model)
             if is_relevant:
                 save_chunk_content(subquestion, url, chunk, summary, is_relevant, reason, chunk_id)
                 chunk_summaries.append(summary)
@@ -768,10 +766,11 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
         f"Given the following context and answers to subquestions, determine if the main question has been fully answered:\n\n"
         f"Main question: {main_question}\n\n"
         f"Context:\n{combined_contexts}\n\n"
-        f"Subquestions and their answers:\n{combined_contexts}\n\n"
+        f"Subquestions and their answers:\n{combined_subquestion_answers}\n\n"
         f"Respond with a JSON object containing the following keys:\n"
         f"{json_format}"
     )
+
     logging.info(f"Checking if main question is answered. Main question: {main_question}")
     response = generate_response_with_ollama(prompt, CONFIG["MODEL_NAME"])
     result = parse_json_response(response, json_format, CONFIG["MODEL_NAME"])
