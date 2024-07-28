@@ -67,7 +67,7 @@ CONFIG = {
     "VECTOR_STORE_COLLECTION_NAME": "documents",  # Collection name in the vector store
 
     # Text processing configuration
-    "TEXT_SNIPPET_LENGTH": 1000,  # Length of text snippets for chunking
+    "TEXT_SNIPPET_LENGTH": 4000,  # Length of text snippets for chunking
     "CONTEXT_LENGTH_TOKENS": 8000,  # Length of context in tokens for generating responses
 
     # User agent configuration
@@ -497,9 +497,9 @@ def evaluate_and_summarize_content(content, subquestion, main_question, model):
         f"Main Question: {main_question}\n\n"
         f"Subquestion: {subquestion}\n\n"
         f"Content: {content}\n\n"
-        f"Task: Determine if the provided content is directly relevant to the subquestion. "
+        f"Task: Determine if the provided content is directly relevant to the subquestion or main question. If the content does not adhere to the constraints specified in either subquestion or main question, consider it not relevant."
         f"Additionally, assess whether the content can help answer the main question. Relevance should be assessed based solely on the specific, factual information contained within the provided content. Do not incorporate any external knowledge or assumptions. "
-        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information for answering either main question or subquestion. Avoid making general statements or referencing any information not present in the provided content. "
+        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently in English. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information for answering either main question or subquestion. Avoid making general statements or referencing any information not present in the provided content. "
         f"Response format: Provide the response in the following plain JSON format without any Markdown formatting:\n"
         f"{json_format}"
     )
@@ -808,7 +808,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
 if __name__ == "__main__":
     try:
         original_query = (
-            "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells and has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
+            "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew spells. A good source of inspiration are class specific handbooks. She has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective level 1 to level 3 spells that would be beneficial for my character to have. Include specific details and explanations for why each spell is beneficial."
         )
 
         logging.info(f"Starting script with original query: {original_query}")
