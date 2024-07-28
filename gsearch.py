@@ -317,11 +317,16 @@ def fetch_content_with_browser(url):
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY_SECONDS"], CONFIG["REQUEST_DELAY_SECONDS"] + 2))
         page_source = browser.page_source
         logging.info("Fetched page source successfully")
-        return page_source, 'html'
+
+        if browser.execute_script("return document.body.textContent.trim().length > 0;"):
+            return page_source, 'html'
+        else:
+            logging.warning("Page does not contain parsable text content")
+            return "", ""
     except Exception as e:
         logging.error(f"Failed to fetch content with browser for URL {url}: {e}")
         return "", ""
-
+    
 def clean_html_content(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     for element in soup(['script', 'style', 'header', 'footer', 'nav', 'aside', 'form']):
@@ -384,7 +389,7 @@ def search_google_with_retries(query, num_results):
                 return google_cache[query]
             
             google_user_agents.user_agents = [ua.random]
-            results = list(search(query, num_results=num_results))
+            results = list(search(query, num_results=num_results, ssl_verify=False, safe=None))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             return results
@@ -412,17 +417,17 @@ def query_vector_store(collection, query, top_k=5):
 
 def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
     prompt = (
-        f"Given the following main question: {query}\n\n"
-        f"Generate {num_subquestions} detailed and specific subquestions that can be used in a Google search query to find pages likely containing relevant information to answer the subquestion or the main question. "
-        f"Ensure the subquestions collectively address all aspects of the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
-        f"Each subquestion should include enough context and keywords to make the answer relevant to the main question. "
-        f"Ensure each subquestion is self-contained and does not reference information not available in the subquestion itself. Only use the provided main question to generate subquestions and do not use any other knowledge."
-        f"Only reply with the subquestions, each on a new line without using a list format."
-    ) 
+        f"Based on the main question: {query}\n\n"
+        f"Generate {num_subquestions} detailed and specific subquestions. These subquestions should help find information relevant to answering both the subquestions and the main question. "
+        f"You may generalize the subquestions if it improves the relevance of the results. Ensure that the subquestions collectively cover all aspects of the main question, including any constraints mentioned. "
+        f"Each subquestion should be self-contained, providing enough context and keywords to be useful independently. Only use the provided main question to generate subquestions, without referencing any additional information."
+        f"Please provide the subquestions, each on a new line without numbering."
+    )   
     response = generate_response_with_ollama(prompt, model)
     if response:
         subquestions = response.split('\n')
         unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip() and not sq.isspace()]))
+        logging.info(f"Initial subquestions generated: {unique_subquestions}")
         return unique_subquestions
     else:
         logging.error("Failed to generate initial subquestions.")
@@ -432,7 +437,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
     prompt = (
         f"Given the following main question: {query}\n\n"
         f"Current context: {context}\n\n"
-        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. Ensure the subquestions collectively address all aspects of the required but missing information to answer the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
+        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. You may generalize the subquestions if it improves the relevance of the results. Ensure the subquestions collectively address all aspects of the required but missing information to answer the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
         f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
         f"Only reply with the subquestions, each on a new line without using a list format."
     )
@@ -567,30 +572,33 @@ def process_url(subquestion, url, model):
         url_cache[url] = (content, content_type)
         save_cache(url_cache, CONFIG["URL_CACHE_FILE_PATH"])
 
-        if content:
-            save_raw_content(subquestion, url, content, content_type)
-            if content_type == 'html':
-                logging.info(f"Cleaning HTML content for URL: {url}")
-                cleaned_html = clean_html_content(content)
-                extracted_text = extract_text_from_html(cleaned_html)
-            else:
-                return "", ""
+        if not content:
+            logging.warning(f"No content fetched for URL: {url}. Skipping further processing.")
+            return "", ""
 
-            cleaned_text = cleanup_extracted_text(extracted_text)
-            if detect_automation_denial(cleaned_text, CONFIG["MODEL_NAME"]):
-                retries += 1
-                logging.warning(f"Detected automation denial. Retrying {retries}/{CONFIG['MAX_RETRIES']}")
-                time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
-                ensure_browser()  # Reinitialize browser with a new user agent
-                continue
+        save_raw_content(subquestion, url, content, content_type)
+        if content_type == 'html':
+            logging.info(f"Cleaning HTML content for URL: {url}")
+            cleaned_html = clean_html_content(content)
+            extracted_text = extract_text_from_html(cleaned_html)
+        else:
+            return "", ""
 
-            if cleaned_text:
-                summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, model)
-                save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
-                logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
-                return summarized_text, url
-            else:
-                save_cleaned_content(subquestion, url, "", "", False, "Failed to extract cleaned text")
+        cleaned_text = cleanup_extracted_text(extracted_text)
+        if detect_automation_denial(cleaned_text, CONFIG["MODEL_NAME"]):
+            retries += 1
+            logging.warning(f"Detected automation denial. Retrying {retries}/{CONFIG['MAX_RETRIES']}")
+            time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
+            ensure_browser()  # Reinitialize browser with a new user agent
+            continue
+
+        if cleaned_text:
+            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, model)
+            save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
+            logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
+            return summarized_text, url
+        else:
+            save_cleaned_content(subquestion, url, "", "", False, "Failed to extract cleaned text")
         retries += 1
         time.sleep(CONFIG["INITIAL_RETRY_DELAY_SECONDS"])
     return "", ""
