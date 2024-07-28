@@ -32,47 +32,32 @@ import json
 
 # Configurable parameters
 CONFIG = {
-    # Model configuration
-    "MODEL_NAME": "gemma2:27b-instruct-q8_0",  # Name of the model used for generating responses
-    "NUM_INITIAL_SUBQUESTIONS": 5,  # Number of initial subquestions to generate
-    "NUM_FOLLOWUP_SUBQUESTIONS": 3,  # Number of follow-up subquestions to generate when more information is needed
-    "NUM_SEARCH_RESULTS_GOOGLE": 5,  # Number of search results to fetch from Google for each subquestion
-    "NUM_SEARCH_RESULTS_VECTOR": 5,  # Number of search results to fetch from the vector store for each subquestion
-    "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",  # Embedding model name used for vector store queries
-
-    # Logging configuration
-    "LOG_FILE_PATH": 'logs/app.log',  # Path to the log file
-
-    # Cache configuration
-    "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',  # File path for the LLM response cache
-    "GOOGLE_CACHE_FILE_PATH": 'cache/google_cache.db',  # File path for the Google search results cache
-    "URL_CACHE_FILE_PATH": 'cache/url_cache.db',  # File path for the URL content cache
-    "CHUNK_CACHE_FILE_PATH": 'cache/chunk_cache.db',  # File path for the document chunk cache
-
-    # Content extraction and processing configuration
-    "EXTRACTED_CONTENT_DIRECTORY": 'extracted_content',  # Directory to store extracted content
-    "RAW_CONTENT_DIRECTORY": 'extracted_content/raw',  # Directory to store raw extracted content
-    "CLEANED_CONTENT_DIRECTORY": 'extracted_content/cleaned',  # Directory to store cleaned content
-    "RELEVANT_CONTENT_DIRECTORY": 'extracted_content/cleaned/relevant',  # Directory to store relevant cleaned content
-    "NOT_RELEVANT_CONTENT_DIRECTORY": 'extracted_content/cleaned/not_relevant',  # Directory to store not relevant cleaned content
-
-    # Request and retry configuration
-    "REQUEST_DELAY_SECONDS": 5,  # Delay between requests to avoid rate limiting
-    "INITIAL_RETRY_DELAY_SECONDS": 60,  # Initial delay before retrying a failed request
-    "MAX_RETRIES": 3,  # Maximum number of retries for failed requests
-    "MAX_REDIRECTS": 3,  # Maximum number of redirects to follow
-
-    # Vector store configuration
-    "VECTOR_STORE_DIRECTORY": "./vector_store",  # Directory path for the vector store
-    "VECTOR_STORE_COLLECTION_NAME": "documents",  # Collection name in the vector store
-
-    # Text processing configuration
-    "TEXT_SNIPPET_LENGTH": 4000,  # Length of text snippets for chunking
-    "CONTEXT_LENGTH_TOKENS": 8000,  # Length of context in tokens for generating responses
-
-    # User agent configuration
-    "NUM_USER_AGENTS": 10,  # Number of user agents to generate
-    "OUTPUT_DIRECTORY": "output"  # Directory to store final output
+    "MODEL_NAME": "gemma2:27b-instruct-q8_0",
+    "NUM_INITIAL_SUBQUESTIONS": 5,
+    "NUM_FOLLOWUP_SUBQUESTIONS": 3,
+    "NUM_SEARCH_RESULTS_GOOGLE": 5,
+    "NUM_SEARCH_RESULTS_VECTOR": 5,
+    "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",
+    "LOG_FILE_PATH": 'logs/app.log',
+    "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',
+    "GOOGLE_CACHE_FILE_PATH": 'cache/google_cache.db',
+    "URL_CACHE_FILE_PATH": 'cache/url_cache.db',
+    "CHUNK_CACHE_FILE_PATH": 'cache/chunk_cache.db',
+    "EXTRACTED_CONTENT_DIRECTORY": 'extracted_content',
+    "RAW_CONTENT_DIRECTORY": 'extracted_content/raw',
+    "CLEANED_CONTENT_DIRECTORY": 'extracted_content/cleaned',
+    "RELEVANT_CONTENT_DIRECTORY": 'extracted_content/cleaned/relevant',
+    "NOT_RELEVANT_CONTENT_DIRECTORY": 'extracted_content/cleaned/not_relevant',
+    "REQUEST_DELAY_SECONDS": 5,
+    "INITIAL_RETRY_DELAY_SECONDS": 60,
+    "MAX_RETRIES": 3,
+    "MAX_REDIRECTS": 3,
+    "VECTOR_STORE_DIRECTORY": "./vector_store",
+    "VECTOR_STORE_COLLECTION_NAME": "documents",
+    "TEXT_SNIPPET_LENGTH": 4000,
+    "CONTEXT_LENGTH_TOKENS": 8000,
+    "NUM_USER_AGENTS": 10,
+    "OUTPUT_DIRECTORY": "output"
 }
 
 # Authenticate to HuggingFace using the token
@@ -283,7 +268,6 @@ def ensure_browser():
         if browser is None:
             raise RuntimeError("Failed to initialize browser after multiple attempts")
 
-
 def fetch_content_with_browser(url):
     ensure_browser()
     try:
@@ -343,7 +327,7 @@ def clean_html_content(html_content):
         for element in tree.xpath('//script|//style|//header|//footer|//nav|//aside|//form'):
             element.drop_tree()
 
-        return etree.tostring(tree, method='html', encoding='unicode')
+        return etree.to_string(tree, method='html', encoding='unicode')
     except Exception as e:
         logging.error(f"Error in cleaning HTML: {e}")
         return ""
@@ -359,27 +343,14 @@ def cleanup_extracted_text(text):
     return text
 
 def generate_search_terms(subquestion, model):
-    if not subquestion.strip():  # Ensure subquestion is not empty
-        logging.error("Subquestion is empty, skipping search term generation.")
-        return subquestion
-
     prompt = (
-        f"Transform the following subquestion into a set of concise Google search terms that cover the subquestion effectively and conform to Google's search best practices. "
-        f"Ensure the search terms are specific, include relevant keywords, use quotation marks for exact phrases, and use the minus sign to exclude unwanted terms. "
-        f"The output should be a single line of text that can be directly used in Google search. Avoid providing explanations or additional tips. "
-        f"Only use the provided subquestion to generate search terms and do not use any other knowledge."
-        f"Subquestion: {subquestion}"
+        f"Given the subquestion: '{subquestion}', generate a set of concise and effective search terms that can be used to retrieve relevant documents from a vector store. "
+        f"The search terms should focus on the key aspects of the subquestion, avoiding any unnecessary words and focusing on the main topics. "
+        f"Output should be a single line of text that includes the key search terms separated by spaces."
     )
-
-    logging.info(f"Generating search terms for subquestion: {subquestion}")
     response = generate_response_with_ollama(prompt, model)
-    if response:
-        search_terms = response.strip()
-        logging.info(f"Generated search terms: {search_terms}")
-        return search_terms
-    else:
-        logging.error("Failed to generate search terms.")
-        return subquestion
+    search_terms = response.strip()
+    return search_terms
 
 def search_google_with_retries(query, num_results):
     for attempt in range(CONFIG["MAX_RETRIES"]):
@@ -497,9 +468,9 @@ def evaluate_and_summarize_content(content, subquestion, main_question, model):
         f"Main Question: {main_question}\n\n"
         f"Subquestion: {subquestion}\n\n"
         f"Content: {content}\n\n"
-        f"Task: Determine if the provided content is directly relevant to the subquestion or main question. If the content does not adhere to the constraints specified in either subquestion or main question, consider it not relevant."
-        f"Additionally, assess whether the content can help answer the main question. Relevance should be assessed based solely on the specific, factual information contained within the provided content. Do not incorporate any external knowledge or assumptions. "
-        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently in English. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information for answering either main question or subquestion. Avoid making general statements or referencing any information not present in the provided content. "
+        f"Task: Determine if the provided content is directly relevant for answering the subquestion or main question. If the content does not adhere to the constraints specified in either subquestion or main question, consider it not relevant. "
+        f"Relevance should be assessed based solely on the specific information contained within the provided content. "
+        f"If the content is relevant, provide a detailed and self-contained summary that can stand independently in English. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information required for answering either main question or subquestion. If all content is relevant you are allowed to include everything and restructure to make the content more clear. Avoid making general statements or referencing any information not present in the provided content. Do not incorporate any external knowledge or assumptions. Evaluate the trustworthiness of the content. If this is considered low, be explicit in the reason you consider this in the summary. "
         f"Response format: Provide the response in the following plain JSON format without any Markdown formatting:\n"
         f"{json_format}"
     )
@@ -633,17 +604,24 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     logging.info(f"Processing subquestion: {subquestion}")
 
-    search_terms = generate_search_terms(f"{subquestion} {context}", model)
-    logging.info(f"Translated search terms: {search_terms}")
+    # Generate search terms for Google
+    search_terms_google = generate_search_terms(f"{subquestion} {context}", model)
+    logging.info(f"Google search terms: {search_terms_google}")
 
-    results = search_google_with_retries(search_terms, num_search_results_google)
+    # Generate search terms for Vector Store
+    search_terms_vector = generate_search_terms(subquestion, model)
+    logging.info(f"Vector store search terms: {search_terms_vector}")
+
+    # Google search
+    results = search_google_with_retries(search_terms_google, num_search_results_google)
     if results:
         urls_to_process.extend(results)
 
+    # Vector store search
     if os.path.exists(CONFIG["VECTOR_STORE_DIRECTORY"]):
         vector_store_client = chromadb.PersistentClient(path=CONFIG["VECTOR_STORE_DIRECTORY"])
         collection = vector_store_client.get_collection(name=CONFIG["VECTOR_STORE_COLLECTION_NAME"])
-        vector_results = query_vector_store(collection, f"{subquestion} {context}", top_k=num_search_results_vector)
+        vector_results = query_vector_store(collection, search_terms_vector, top_k=num_search_results_vector)
 
         sources_processed = set()
         combined_documents = {}
