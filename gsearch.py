@@ -389,7 +389,7 @@ def search_google_with_retries(query, num_results):
                 return google_cache[query]
             
             google_user_agents.user_agents = [ua.random]
-            results = list(search(query, num_results=num_results, ssl_verify=False, safe=None))
+            results = list(search(query, num_results=num_results, safe=None))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             return results
@@ -489,17 +489,19 @@ def request_llm_to_fix_json_creatively(response, error, json_format, model):
     fixed_response = generate_response_with_ollama(prompt, model)
     return fixed_response
 
-def evaluate_and_summarize_content(content, query_context, subquestion, model):
+def evaluate_and_summarize_content(content, query_context, subquestion, main_question, model):
     json_format = (
-        '{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise detailed summary if relevant>"\n}'
+        '{\n  "relevant": true/false,\n  "reason": "<reason for relevance>",\n  "summary": "<concise detailed summary if relevant>",\n  "main_question_relevance": "<parts that help answer the main question>"\n}'
     )
     prompt = (
         f"Context: {query_context}\n\n"
         f"Content: {content}\n\n"
         f"Subquestion: {subquestion}\n\n"
+        f"Main Question: {main_question}\n\n"
         f"Task: Determine if the provided content is directly relevant to the context for answering the subquestion. "
-        f"Relevance should be assessed based solely on the specific, factual information contained within the provided context. Do not incorporate any external knowledge or assumptions. "
+        f"Additionally, determine if it can also help answer the main question. Relevance should be assessed based solely on the specific, factual information contained within the provided context. Do not incorporate any external knowledge or assumptions. "
         f"If the content is relevant, provide a detailed and self-contained summary that can stand independently. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information. Avoid making general statements or referencing any information not present in the provided content. "
+        f"Moreover, specify the parts of the content that can help in answering the main question.\n"
         f"Response format: Provide the response in the following plain JSON format without any Markdown formatting:\n"
         f"{json_format}"
     )
@@ -511,20 +513,21 @@ def evaluate_and_summarize_content(content, query_context, subquestion, model):
         is_relevant = result.get("relevant", False)
         reason = result.get("reason", "No reason provided")
         summary = result.get("summary", "") or ""
-        logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}")
-        return is_relevant, reason, summary
+        main_question_relevance = result.get("main_question_relevance", "") or ""
+        logging.info(f"Content relevance and summary result for context {query_context[:200]}: {is_relevant}, Reason: {reason}, Summary: {summary[:200]}, Main Question Relevance: {main_question_relevance[:200]}")
+        return is_relevant, reason, summary, main_question_relevance
     else:
         logging.error(f"Failed to evaluate and summarize content for subquestion: {subquestion[:200]}")
-        return False, "Failed to parse JSON response", ""
+        return False, "Failed to parse JSON response", "", ""
 
-def split_and_process_chunks(subquestion, url, text, model):
+def split_and_process_chunks(subquestion, url, text, main_question, model):
     # Generate a hash of the text to use as a cache key
     text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
 
     # Check if the chunks are already in the cache
     if text_hash in chunk_cache:
         logging.info(f"Using cached chunks for text hash: {text_hash}")
-        chunk_summaries, chunk_relevance = chunk_cache[text_hash]
+        chunk_summaries, chunk_relevance, chunk_main_relevance = chunk_cache[text_hash]
     else:
         embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
         splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
@@ -534,17 +537,19 @@ def split_and_process_chunks(subquestion, url, text, model):
         
         chunk_summaries = []
         chunk_relevance = []
+        chunk_main_relevance = []
 
         for chunk_id, node in enumerate(nodes, 1):
             chunk = node.text
-            is_relevant, reason, summary = evaluate_and_summarize_content(chunk, subquestion, subquestion, model)
+            is_relevant, reason, summary, main_question_relevance = evaluate_and_summarize_content(chunk, subquestion, subquestion, main_question, model)
             if is_relevant:
                 save_chunk_content(subquestion, url, chunk, summary, is_relevant, reason, chunk_id)
                 chunk_summaries.append(summary)
                 chunk_relevance.append(is_relevant)
+                chunk_main_relevance.append(main_question_relevance)
 
         # Save the chunks to the cache
-        chunk_cache[text_hash] = (chunk_summaries, chunk_relevance)
+        chunk_cache[text_hash] = (chunk_summaries, chunk_relevance, chunk_main_relevance)
         save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE_PATH"])
 
     summarized_text = " ".join(chunk_summaries)
@@ -564,7 +569,7 @@ def detect_automation_denial(content, model):
         return True
     return False
 
-def process_url(subquestion, url, model):
+def process_url(subquestion, url, main_question, model):
     logging.info(f"Fetching content for URL: {url}")
     retries = 0
     while retries < CONFIG["MAX_RETRIES"]:
@@ -593,7 +598,7 @@ def process_url(subquestion, url, model):
             continue
 
         if cleaned_text:
-            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, model)
+            summarized_text, is_relevant, reason = split_and_process_chunks(subquestion, url, cleaned_text, main_question, model)
             save_cleaned_content(subquestion, url, cleaned_text, summarized_text, is_relevant, reason)
             logging.info(f"Cleaned text for URL {url}: {cleaned_text[:200]}")
             return summarized_text, url
@@ -662,7 +667,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 time.sleep(wait_time)
                 current_time = time.time()
 
-            extracted_text, reference = process_url(subquestion, current_url, model)
+            extracted_text, reference = process_url(subquestion, current_url, original_query, model)
             if extracted_text.strip() and f"Content from {current_url}:\n{extracted_text}" not in subquestion_contexts:
                 subquestion_contexts.append(f"Content from {current_url}:\n{extracted_text}")
                 subquestion_references.append(reference)
@@ -673,7 +678,7 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
             logging.info(f"Evaluating content relevance for document from vector store with metadata: {meta}")
-            summarized_text, is_relevant, reason = split_and_process_chunks(f"{subquestion} {context}", meta.get('source', 'vector_store'), doc, model)
+            summarized_text, is_relevant, reason = split_and_process_chunks(f"{subquestion} {context}", meta.get('source', 'vector_store'), doc, original_query, model)
             source = meta.get('source', 'vector_store')
             if summarized_text.strip() and f"Content from {source}:\n{summarized_text}" not in subquestion_contexts:
                 subquestion_contexts.append(f"Content from {source}:\n{summarized_text}")
@@ -763,7 +768,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
         f"Given the following context and answers to subquestions, determine if the main question has been fully answered:\n\n"
         f"Main question: {main_question}\n\n"
         f"Context:\n{combined_contexts}\n\n"
-        f"Subquestions and their answers:\n{combined_subquestion_answers}\n\n"
+        f"Subquestions and their answers:\n{combined_contexts}\n\n"
         f"Respond with a JSON object containing the following keys:\n"
         f"{json_format}"
     )
