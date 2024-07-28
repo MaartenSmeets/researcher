@@ -427,6 +427,7 @@ def parse_json_response(response, json_format, model, max_retries=3):
         try:
             response = response.strip('```json').strip('```').strip()
             result = json.loads(response)
+            logging.info(f"Parsed JSON response successfully: {result}")
             return result
         except json.JSONDecodeError as e:
             logging.error(f"Failed to parse JSON response: {e}\nResponse: {response}")
