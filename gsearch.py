@@ -33,10 +33,10 @@ import json
 # Configurable parameters
 CONFIG = {
     "MODEL_NAME": "gemma2:27b-instruct-q8_0",
-    "NUM_INITIAL_SUBQUESTIONS": 5,
-    "NUM_FOLLOWUP_SUBQUESTIONS": 3,
-    "NUM_SEARCH_RESULTS_GOOGLE": 5,
-    "NUM_SEARCH_RESULTS_VECTOR": 5,
+    "NUM_INITIAL_SUBQUESTIONS": 3,
+    "NUM_FOLLOWUP_SUBQUESTIONS": 1,
+    "NUM_SEARCH_RESULTS_GOOGLE": 3,
+    "NUM_SEARCH_RESULTS_VECTOR": 3,
     "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",
     "LOG_FILE_PATH": 'logs/app.log',
     "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',
@@ -553,9 +553,6 @@ def process_url(subquestion, url, main_question, model):
     retries = 0
     while retries < CONFIG["MAX_RETRIES"]:
         content, content_type = fetch_content_with_browser(url)
-        url_cache[url] = (content, content_type)
-        save_cache(url_cache, CONFIG["URL_CACHE_FILE_PATH"])
-
         if not content:
             logging.warning(f"No content fetched for URL: {url}. Skipping further processing.")
             return "", ""
