@@ -523,8 +523,7 @@ def split_and_process_chunks(subquestion, url, text, main_question, model):
         chunk_summaries, chunk_relevance, chunk_main_relevance = chunk_cache[text_hash]
     else:
         splitter = SentenceSplitter(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50)
-        document = Document(text=text)
-        nodes = splitter.split(document)
+        nodes = splitter.split_text(text)
         
         chunk_summaries, chunk_relevance, chunk_main_relevance = process_chunks(nodes, subquestion, url, main_question, model)
 
