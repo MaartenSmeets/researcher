@@ -24,9 +24,9 @@ from webdriver_manager.chrome import ChromeDriverManager
 from torch import device as torch_device
 from fake_useragent import UserAgent
 from ollama import generate
-from llama_index.core.node_parser import SemanticSplitterNodeParser
 from llama_index.core import Document
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.core.node_parser.text import SentenceSplitter
 import portalocker
 import json
 
@@ -522,15 +522,9 @@ def split_and_process_chunks(subquestion, url, text, main_question, model):
         logging.info(f"Using cached chunks for text hash: {text_hash}")
         chunk_summaries, chunk_relevance, chunk_main_relevance = chunk_cache[text_hash]
     else:
-        if len(text) <= CONFIG["TEXT_SNIPPET_LENGTH"]:
-            # Process the entire text as a whole
-            nodes = [Document(text=text)]
-        else:
-            embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
-            splitter = SemanticSplitterNodeParser(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50, embed_model=embed_model)
-        
-            document = Document(text=text)
-            nodes = splitter.build_semantic_nodes_from_documents([document])
+        splitter = SentenceSplitter(chunk_size=CONFIG["TEXT_SNIPPET_LENGTH"], chunk_overlap=50)
+        document = Document(text=text)
+        nodes = splitter.split(document)
         
         chunk_summaries, chunk_relevance, chunk_main_relevance = process_chunks(nodes, subquestion, url, main_question, model)
 
