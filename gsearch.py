@@ -36,7 +36,7 @@ CONFIG = {
     "NUM_INITIAL_SUBQUESTIONS": 1,
     "NUM_FOLLOWUP_SUBQUESTIONS": 1,
     "NUM_SEARCH_RESULTS_GOOGLE": 1,
-    "NUM_SEARCH_RESULTS_VECTOR": 1,
+    "NUM_SEARCH_RESULTS_VECTOR": 0,
     "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",
     "LOG_FILE_PATH": 'logs/app.log',
     "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',
@@ -376,6 +376,13 @@ def search_google_with_retries(query, num_results):
     return []
 
 def query_vector_store(collection, query, top_k=5):
+    if top_k == 0:
+        logging.info("No vector search results requested.")
+        return {
+            'documents': [],
+            'metadatas': []
+        }
+    
     embed_model = HuggingFaceEmbedding(model_name=CONFIG["EMBEDDING_MODEL_NAME"], device=device)
     embedding = embed_model.get_text_embedding(query)
     try:
@@ -384,7 +391,10 @@ def query_vector_store(collection, query, top_k=5):
         return results
     except Exception as e:
         logging.error(f"Failed to query vector store: {e}")
-        return []
+        return {
+            'documents': [],
+            'metadatas': []
+        }
 
 def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
     prompt = (
