@@ -33,10 +33,10 @@ import json
 # Configurable parameters
 CONFIG = {
     "MODEL_NAME": "gemma2:27b-instruct-q8_0",
-    "NUM_INITIAL_SUBQUESTIONS": 3,
+    "NUM_INITIAL_SUBQUESTIONS": 1,
     "NUM_FOLLOWUP_SUBQUESTIONS": 1,
-    "NUM_SEARCH_RESULTS_GOOGLE": 3,
-    "NUM_SEARCH_RESULTS_VECTOR": 3,
+    "NUM_SEARCH_RESULTS_GOOGLE": 1,
+    "NUM_SEARCH_RESULTS_VECTOR": 1,
     "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",
     "LOG_FILE_PATH": 'logs/app.log',
     "LLM_CACHE_FILE_PATH": 'cache/llm_cache.db',
@@ -282,7 +282,7 @@ def fetch_content_with_browser(url):
             cookie_buttons = WebDriverWait(browser, 5).until(
                 EC.presence_of_all_elements_located((
                     By.XPATH,
-                    "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'proceed') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'continue')]"
+                    "//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'agree') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'proceed') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'allow') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'consent') or contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'ok')]"
                 ))
             )
             for cookie_button in cookie_buttons:
@@ -360,7 +360,7 @@ def search_google_with_retries(query, num_results):
                 return google_cache[query]
             
             google_user_agents.user_agents = [ua.random]
-            results = list(search(query, num_results=num_results, safe=None))
+            results = list(search(query, num_results=num_results, safe=None,))
             google_cache[query] = results
             save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             return results
@@ -390,7 +390,7 @@ def rephrase_query_to_initial_subquestions(query, model, num_subquestions):
     prompt = (
         f"Based on the main question: {query}\n\n"
         f"Generate {num_subquestions} detailed and specific subquestions. These subquestions should help find information relevant to answering both the subquestions and the main question. "
-        f"You may generalize the subquestions if it improves the relevance of the results. Ensure that the subquestions collectively cover all aspects of the main question, including any constraints mentioned. "
+        f"You may generalize the subquestions if it improves the relevance of the results. Ensure that the subquestions collectively cover all aspects of the main question. Include constraints specified in the main question also in the subquestions such as source constraints. "
         f"Each subquestion should be self-contained, providing enough context and keywords to be useful independently. Only use the provided main question to generate subquestions, without referencing any additional information."
         f"Please provide only the subquestions, each on a new line without numbering. Do not provide any additional information or explanations."
     )   
@@ -408,7 +408,7 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
     prompt = (
         f"Given the following main question: {query}\n\n"
         f"Current context: {context}\n\n"
-        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question, focusing on missing information required to complete the answer. You may generalize the subquestions if it improves the relevance of the results. Ensure the subquestions collectively address all aspects of the required but missing information to answer the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
+        f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question. Focus on information which is not present in the context but required to answer the main question. You may generalize the subquestions if it improves the relevance of the results. Ensure the subquestions collectively address all aspects of the required but missing information to answer the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
         f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
         f"Only reply with the subquestions, each on a new line without using a list format."
     )
@@ -416,7 +416,8 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
     if response:
         subquestions = response.split('\n')
         unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip() and not sq.isspace()]))
-        return subquestions
+        logging.info(f"Follow-up subquestions generated: {unique_subquestions}")
+        return unique_subquestions
     else:
         logging.error("Failed to generate follow-up subquestions.")
         return []
@@ -469,7 +470,7 @@ def evaluate_and_summarize_content(content, subquestion, main_question, model):
         f"Main Question: {main_question}\n\n"
         f"Subquestion: {subquestion}\n\n"
         f"Content: {content}\n\n"
-        f"Task: Determine if the provided content is directly relevant for answering the subquestion or main question. If the content does not adhere to the constraints specified in either subquestion or main question, consider it not relevant. "
+        f"Task: Determine if the provided content is directly relevant for answering the subquestion or main question. If the content does not adhere to the constraints specified in the main question, consider it not relevant. "
         f"Relevance should be assessed based solely on the specific information contained within the provided content. "
         f"If the content is relevant, provide a detailed and self-contained summary that can stand independently in English. The summary should be exhaustive, including all specific details and explicitly mentioning all relevant information required for answering either main question or subquestion. If all content is relevant you are allowed to include everything and restructure to make the content more clear. Avoid making general statements or referencing any information not present in the provided content. Do not incorporate any external knowledge or assumptions. Evaluate the trustworthiness of the content. If this is considered low, be explicit in the reason you consider this in the summary. "
         f"Response format: Provide the response in the following plain JSON format without any Markdown formatting:\n"
@@ -495,7 +496,11 @@ def process_chunks(nodes, subquestion, url, main_question, model):
     chunk_relevance = []
     chunk_main_relevance = []
 
+    total_chunks = len(nodes)
+    logging.info(f"Processing {total_chunks} chunks for subquestion: {subquestion}")
+
     for chunk_id, node in enumerate(nodes, 1):
+        logging.info(f"Processing chunk {chunk_id}/{total_chunks} for subquestion: {subquestion}")
         chunk = node.text
         metadata = node.metadata  # Fetching metadata for the chunk
         
@@ -532,7 +537,7 @@ def split_and_process_chunks(subquestion, url, text, main_question, model):
         save_cache(chunk_cache, CONFIG["CHUNK_CACHE_FILE_PATH"])
 
     summarized_text = " ".join(chunk_summaries)
-    is_relevant = any(chunk_relevance)
+    is_relevant = any(chunk_relevance) or any(chunk_main_relevance)
     reason = "At least one chunk is relevant" if is_relevant else "None of the chunks are relevant"
 
     return summarized_text, is_relevant, reason
@@ -658,6 +663,8 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 visited_urls.add(current_url)
                 domain_timestamps[domain] = current_time
 
+            logging.info(f"URLs remaining: {len(urls_to_process)}, Documents remaining: {len(documents_to_process)}")
+
         if documents_to_process:
             doc, meta = documents_to_process.pop(0)
             logging.info(f"Evaluating content relevance for document from vector store with metadata: {meta}")
@@ -669,6 +676,8 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
                 relevant_answers.append(summarized_text)
                 save_cleaned_content(subquestion, source, doc, summarized_text, is_relevant, reason, source="vector_store", vector_metadata=meta)
                 logging.info(f"Document from vector store: {doc[:200]}")
+
+            logging.info(f"URLs remaining: {len(urls_to_process)}, Documents remaining: {len(documents_to_process)}")
 
         time.sleep(random.uniform(CONFIG["REQUEST_DELAY_SECONDS"], CONFIG["REQUEST_DELAY_SECONDS"] + 2))
 
@@ -700,34 +709,57 @@ def process_subquestion(subquestion, model, num_search_results_google, num_searc
 
     return subquestion_contexts, subquestion_references, all_subquestion_answers
 
-def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context=""):
+def search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context="", initial_call=True):
     all_contexts = []
     all_references = []
     all_subquestion_answers = []
-    main_question_answered = False
-
     all_subquestions_used = subquestions[:]
 
+    def process_subquestions(subquestions, context):
+        local_contexts = []
+        local_references = []
+        local_subquestion_answers = []
+        while subquestions:
+            subquestion = subquestions.pop(0)
+            subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query, context)
+
+            if subquestion_context:
+                local_contexts.extend(subquestion_context)
+                local_references.extend(references)
+                local_subquestion_answers.extend(subquestion_answers)
+            else:
+                context_str = "\n\n".join(local_contexts) + "\n\n" + context
+                refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
+                subquestions.extend(refined_subquestions)
+                all_subquestions_used.extend(refined_subquestions)
+
+            logging.info(f"Subquestions remaining: {len(subquestions)}")
+
+        return local_contexts, local_references, local_subquestion_answers
+
     while subquestions:
-        subquestion = subquestions.pop()
-        subquestion_context, references, subquestion_answers = process_subquestion(subquestion, model, num_search_results_google, num_search_results_vector, original_query, context)
+        sub_contexts, sub_references, sub_answers = process_subquestions(subquestions, context)
+        all_contexts.extend(sub_contexts)
+        all_references.extend(sub_references)
+        all_subquestion_answers.extend(sub_answers)
 
-        if subquestion_context:
-            all_contexts.extend(subquestion_context)
-            all_references.extend(references)
-            all_subquestion_answers.extend(subquestion_answers)
+        if initial_call:
+            logging.info("Evaluating if the main question is answered.")
+            main_question_answered, additional_information_needed = check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query)
+            if main_question_answered:
+                logging.info("Main question answered successfully.")
+                break
+            else:
+                logging.info("Main question not answered. Generating follow-up subquestions.")
+                refined_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_FOLLOWUP_SUBQUESTIONS"], additional_information_needed)
+                if not refined_subquestions:
+                    logging.error("Failed to generate follow-up subquestions.")
+                    break
+                subquestions.extend(refined_subquestions)
+                all_subquestions_used.extend(refined_subquestions)
+                initial_call = False
         else:
-            context_str = "\n\n".join(all_contexts) + "\n\n" + context
-            refined_subquestions = rephrase_query_to_followup_subquestions(subquestion, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
-            subquestions.extend(refined_subquestions)
-            all_subquestions_used.extend(refined_subquestions)
-
-    if not main_question_answered:
-        context_str = "\n\n".join(all_contexts) + "\n\n" + context
-        remaining_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_INITIAL_SUBQUESTIONS"], context_str)
-        subquestions.extend(remaining_subquestions)
-        all_subquestions_used.extend(remaining_subquestions)
-        search_and_extract(subquestions, model, num_search_results_google, num_search_results_vector, original_query, context_str)
+            logging.info("Not the initial call. Not evaluating the main question")
 
     if all_contexts:
         combined_contexts = "\n\n".join(all_contexts) + "\n\n" + context
@@ -741,7 +773,7 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
         response = generate_response_with_ollama(prompt, model)
         save_final_output(original_query, all_subquestions_used, all_contexts, [response])
 
-def check_if_main_question_answered(contexts, subquestion_answers, main_question, subquestions):
+def check_if_main_question_answered(contexts, subquestion_answers, main_question):
     combined_contexts = "\n\n".join(contexts)
     combined_subquestion_answers = "\n\n".join(subquestion_answers)
     json_format = (
@@ -761,18 +793,9 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
     result = parse_json_response(response, json_format, CONFIG["MODEL_NAME"])
     if result:
         answered = result.get("answered", False)
-        reason = result.get("reason", "")
         additional_information_needed = result.get("additional_information_needed", "")
-
-        if answered:
-            return True
-        else:
-            logging.info(f"Reason: {reason}")
-            logging.info(f"Additional information needed: {additional_information_needed}")
-            refined_subquestions = rephrase_query_to_followup_subquestions(main_question, CONFIG["MODEL_NAME"], CONFIG["NUM_FOLLOWUP_SUBQUESTIONS"], additional_information_needed)
-            subquestions.extend(refined_subquestions)
-            return False
-    return False
+        return answered, additional_information_needed
+    return False, ""
 
 if __name__ == "__main__":
     try:
