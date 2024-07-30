@@ -357,15 +357,16 @@ def search_google_with_retries(query, num_results):
         try:
             if query in google_cache and attempt == 0:
                 logging.info(f"Using cached Google search results for query: {query}")
-                return google_cache[query]
+                results = google_cache[query]
+            else:
+                google_user_agents.user_agents = [ua.random]
+                results = list(search(query, num_results=num_results, safe=None))
+                google_cache[query] = results
+                save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
             
-            google_user_agents.user_agents = [ua.random]
-            results = list(search(query, num_results=num_results, safe=None,))
-            google_cache[query] = results
-            save_cache(google_cache, CONFIG["GOOGLE_CACHE_FILE_PATH"])
-            return results
+            return results[:num_results]  # Return only the requested amount of results
         except Exception as e:
-            if e.response.status_code == 429:
+            if hasattr(e, 'response') and e.response.status_code == 429:
                 retry_after = CONFIG["INITIAL_RETRY_DELAY_SECONDS"] * (2 ** attempt)
                 logging.info(f"Received 429 error. Retrying after {retry_after} seconds.")
                 time.sleep(retry_after)
