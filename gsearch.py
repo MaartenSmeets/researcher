@@ -33,9 +33,9 @@ import json
 # Configurable parameters
 CONFIG = {
     "MODEL_NAME": "gemma2:27b-instruct-q8_0",
-    "NUM_INITIAL_SUBQUESTIONS": 1,
-    "NUM_FOLLOWUP_SUBQUESTIONS": 1,
-    "NUM_SEARCH_RESULTS_GOOGLE": 1,
+    "NUM_INITIAL_SUBQUESTIONS": 5,
+    "NUM_FOLLOWUP_SUBQUESTIONS": 2,
+    "NUM_SEARCH_RESULTS_GOOGLE": 5,
     "NUM_SEARCH_RESULTS_VECTOR": 0,
     "EMBEDDING_MODEL_NAME": "mixedbread-ai/mxbai-embed-large-v1",
     "LOG_FILE_PATH": 'logs/app.log',
@@ -420,15 +420,16 @@ def rephrase_query_to_followup_subquestions(query, model, num_subquestions, cont
         f"Given the following main question: {query}\n\n"
         f"Current context: {context}\n\n"
         f"Generate {num_subquestions} detailed and specific follow-up subquestions that can help answer the main question. Focus on information which is not present in the context but required to answer the main question. You may generalize the subquestions if it improves the relevance of the results. Ensure the subquestions collectively address all aspects of the required but missing information to answer the main question. Make sure any restraints set in the main question are also applied and make explicit in the subquestions."
-        f"Each subquestion should be self-contained and does not reference information not available in the subquestion itself. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
+        f"Each subquestion should be self-contained and should contain all relevant information to allow finding information to answer the question. There should not be external references. If elaboration of the main question is required to generate subquestions, make a logical assumption based on the context, mention the assumption explicitely and elaborate on why the assumption is made. Only use the provided context to generate follow-up subquestions and do not use any other knowledge."
         f"Only reply with the subquestions, each on a new line without using a list format."
     )
     response = generate_response_with_ollama(prompt, model)
     if response:
         subquestions = response.split('\n')
         unique_subquestions = list(set([sq.strip() for sq in subquestions if sq.strip() and not sq.isspace()]))
-        logging.info(f"Follow-up subquestions generated: {unique_subquestions}")
-        return unique_subquestions
+        num_to_return = min(len(unique_subquestions), num_subquestions)
+        logging.info(f"Follow-up subquestions generated: {num_to_return}")
+        return unique_subquestions[:num_to_return]
     else:
         logging.error("Failed to generate follow-up subquestions.")
         return []
@@ -748,35 +749,32 @@ def search_and_extract(subquestions, model, num_search_results_google, num_searc
 
         return local_contexts, local_references, local_subquestion_answers
 
-    while subquestions:
+    while True:
         sub_contexts, sub_references, sub_answers = process_subquestions(subquestions, context)
         all_contexts.extend(sub_contexts)
         all_references.extend(sub_references)
         all_subquestion_answers.extend(sub_answers)
 
-        if initial_call:
-            logging.info("Evaluating if the main question is answered.")
-            main_question_answered, additional_information_needed = check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query)
-            if main_question_answered:
-                logging.info("Main question answered successfully.")
-                break
-            else:
-                logging.info("Main question not answered. Generating follow-up subquestions.")
-                refined_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_FOLLOWUP_SUBQUESTIONS"], additional_information_needed)
-                if not refined_subquestions:
-                    logging.error("Failed to generate follow-up subquestions.")
-                    break
-                subquestions.extend(refined_subquestions)
-                all_subquestions_used.extend(refined_subquestions)
-                initial_call = False
+        logging.info("Evaluating if the main question is answered.")
+        main_question_answered, additional_information_needed = check_if_main_question_answered(all_contexts, all_subquestion_answers, original_query)
+        if main_question_answered:
+            logging.info("Main question can be answered.")
+            break
         else:
-            logging.info("Not the initial call. Not evaluating the main question")
+            logging.info("Main question can not answered. Generating follow-up subquestions.")
+            refined_subquestions = rephrase_query_to_followup_subquestions(original_query, model, CONFIG["NUM_FOLLOWUP_SUBQUESTIONS"], additional_information_needed)
+            if not refined_subquestions:
+                logging.error("Failed to generate follow-up subquestions.")
+                break
+            subquestions.extend(refined_subquestions)
+            all_subquestions_used.extend(refined_subquestions)
 
     if all_contexts:
+        logging.info("Answering the main question")
         combined_contexts = "\n\n".join(all_contexts) + "\n\n" + context
         prompt = (
             f"Given the following context, subquestions, and their answers, answer the main question: {original_query}\n\n"
-            f"The provided context encompasses both factual information and a range of opinions. In addition, several subquestions related to the main question have been answered, and these answers should be considered when formulating your response. Your task is to use solely the supplied context, along with the subquestions and their answers, to construct a comprehensive and detailed response to the main question. Refrain from incorporating any external knowledge or information.\n\n"
+            f"Several subquestions related to the main question have been answered, and these answers should be considered when formulating your response. Your task is to use solely the supplied context, along with the subquestions and their answers, to construct a comprehensive and detailed response to the main question. Refrain from incorporating any external knowledge or information.\n\n"
             f"Context:\n{combined_contexts}\n\n"
             f"Subquestions and their answers:\n{all_subquestion_answers}\n\n"
             f"Ensure your answer is exhaustive, drawing upon all relevant details from the context and the subquestion answers. Provide a clear and well-structured response that fully addresses the main question."
@@ -811,7 +809,7 @@ def check_if_main_question_answered(contexts, subquestion_answers, main_question
 if __name__ == "__main__":
     try:
         original_query = (
-            "I am playing as an Eldritch Knight Elf in Dungeons & Dragons 5th Edition, focusing on ranged combat. My character does not have access to homebrew content. A good source of inspiration are class specific handbooks. She has a Dexterity score of 20 and an Intelligence score of 16. Please provide a list of effective feats that would be beneficial for my character to have. I already have crossbow expert and sharpshooter. Include specific details and explanations for why each feat is beneficial."
+            "What is the meaning of life?"
         )
 
         logging.info(f"Starting script with original query: {original_query}")
